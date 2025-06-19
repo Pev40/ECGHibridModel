@@ -1,0 +1,67 @@
+/ecgrepli
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# IDEs and editors
+.idea/
+.vscode/
+*.swp
+*.swo
+.project
+.classpath
+.settings/
+
+# Logs and databases
+*.log
+*.sqlite
+*.db
+
+# Data files
+data/
+*.pt
+*.pth
+*.h5
+*.npy
+*.npz
+*.csv
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Experiments and results
+experiments_logs/
+results/
+runs/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db

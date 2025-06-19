@@ -1,0 +1,13 @@
+kmeans-pytorch
+matplotlib
+pandas
+scikit-learn
+scipy
+seaborn
+torch
+torch-fidelity
+torchaudio
+torchmetrics
+torchvision
+tqdm
+wandb
