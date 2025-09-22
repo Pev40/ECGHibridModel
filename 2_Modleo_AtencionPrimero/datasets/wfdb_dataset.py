@@ -13,6 +13,14 @@ try:
 except Exception:
     loadmat = None
 
+try:
+    from scipy.signal import butter, filtfilt, iirnotch, resample_poly
+except Exception:
+    butter = None
+    filtfilt = None
+    iirnotch = None
+    resample_poly = None
+
 
 def _parse_header_labels(hea_path):
     labels = []
@@ -29,6 +37,100 @@ def _parse_header_labels(hea_path):
     return labels
 
 
+def _parse_header_fs(hea_path):
+    fs = None
+    try:
+        with open(hea_path, 'r', encoding='utf-8', errors='ignore') as f:
+            first = f.readline()
+            m = re.search(r"(\d+(?:\.\d+)?)\s*Hz", first, re.IGNORECASE)
+            if m:
+                fs = float(m.group(1))
+            else:
+                m2 = re.search(r"(\d+(?:\.\d+)?)/(?:mV|\w+)", first)
+                if m2:
+                    try:
+                        fs = float(m2.group(1))
+                    except Exception:
+                        pass
+        if fs is None:
+            with open(hea_path, 'r', encoding='utf-8', errors='ignore') as f:
+                for ln in f:
+                    m = re.search(r"(?:Sampling frequency|fs)\s*:?\s*(\d+(?:\.\d+)?)", ln, re.IGNORECASE)
+                    if m:
+                        fs = float(m.group(1))
+                        break
+    except Exception:
+        pass
+    return fs
+
+
+def extract_patient_id(hea_path, root_dir=None):
+    pid = None
+    try:
+        with open(hea_path, 'r', encoding='utf-8', errors='ignore') as f:
+            for ln in f:
+                if ln.startswith('#'):
+                    m = re.search(r"(Patient ID|Patient|Subject ID|Subject|Record ID|PID)\s*:?\s*([\w\-]+)", ln, re.IGNORECASE)
+                    if m:
+                        pid = m.group(2)
+                        break
+    except Exception:
+        pass
+    if pid is None and root_dir is not None:
+        try:
+            rel = os.path.relpath(hea_path, root_dir)
+            parts = rel.split(os.sep)
+            if len(parts) >= 2:
+                pid = parts[0]
+        except Exception:
+            pid = None
+    if pid is None:
+        stem = os.path.splitext(os.path.basename(hea_path))[0]
+        pid = re.split(r"[_\-]", stem)[0]
+    return pid
+
+
+def _butter_bandpass(lowcut_hz, highcut_hz, fs, order=2):
+    if butter is None or filtfilt is None:
+        return None, None
+    nyq = 0.5 * fs
+    low = max(1e-6, lowcut_hz / nyq)
+    high = min(0.999, highcut_hz / nyq)
+    b, a = butter(order, [low, high], btype='band')
+    return b, a
+
+
+def _apply_filters(x_np, fs, band=(0.5, 45.0), notch_hz=None):
+    if butter is None or filtfilt is None:
+        return x_np
+    x = x_np
+    try:
+        if band is not None:
+            b, a = _butter_bandpass(band[0], band[1], fs, order=2)
+            if b is not None:
+                x = filtfilt(b, a, x, axis=1)
+        if notch_hz in (50, 60) and iirnotch is not None:
+            q = 30.0
+            b_notch, a_notch = iirnotch(w0=notch_hz/(fs/2), Q=q)
+            x = filtfilt(b_notch, a_notch, x, axis=1)
+    except Exception:
+        return x_np
+    return x
+
+
+def _resample_if_needed(x_np, fs, target_fs):
+    if target_fs is None or fs is None or resample_poly is None:
+        return x_np, fs
+    if abs(fs - target_fs) < 1e-3:
+        return x_np, fs
+    try:
+        from fractions import Fraction
+        frac = Fraction(str(target_fs / fs)).limit_denominator(100)
+        up, down = frac.numerator, frac.denominator
+        x_rs = resample_poly(x_np, up, down, axis=1)
+        return x_rs, float(target_fs)
+    except Exception:
+        return x_np, fs
 def _load_signal_mat(mat_path):
     if loadmat is None:
         raise RuntimeError('scipy.io.loadmat no disponible. Instala scipy.')
@@ -56,7 +158,8 @@ def build_code_map(hea_files, top_k=10, save_path=None):
 
 class WFDBECGDataset(Dataset):
     def __init__(self, root_dir, sequence_len=5000, code_to_idx=None, files=None, normalize='zscore',
-                 multilabel=False, hierarchy_path=None, cache_dir=None):
+                 multilabel=False, hierarchy_path=None, cache_dir=None, random_crop=True,
+                 target_fs=500.0, bandpass_hz=(0.5, 45.0), notch_hz=None, eval_mode=False):
         super().__init__()
         self.root_dir = root_dir
         if files is None:
@@ -68,6 +171,11 @@ class WFDBECGDataset(Dataset):
         self.normalize = normalize
         self.multilabel = multilabel
         self.cache_dir = cache_dir
+        self.random_crop = random_crop
+        self.eval_mode = eval_mode
+        self.target_fs = target_fs
+        self.bandpass_hz = bandpass_hz
+        self.notch_hz = notch_hz
 
         # Jerarquía (opcional)
         self.hierarchy = None
@@ -93,6 +201,7 @@ class WFDBECGDataset(Dataset):
 
         # filtrar pares sin label mapeable
         self.samples = []
+        self.sample_patient_ids = []
         for hea, mat in self.pairs:
             labels = _parse_header_labels(hea)
             if self.multilabel and self.hierarchy:
@@ -121,6 +230,7 @@ class WFDBECGDataset(Dataset):
                         break
                 if idx is not None:
                     self.samples.append((hea, mat, idx))
+            self.sample_patient_ids.append(extract_patient_id(hea, self.root_dir))
 
     def __len__(self):
         return len(self.samples)
@@ -146,29 +256,47 @@ class WFDBECGDataset(Dataset):
     def __getitem__(self, idx):
         rec = self.samples[idx]
         hea, mat = rec[0], rec[1]
-        # Cache: .pt por registro (opcional)
+        fs = _parse_header_fs(hea)
+        # Cache: .pt por registro (opcional) con preprocesado
         if self.cache_dir:
             os.makedirs(self.cache_dir, exist_ok=True)
             rec_id = os.path.relpath(os.path.splitext(mat)[0], self.root_dir).replace(os.sep, '_')
             pt_path = os.path.join(self.cache_dir, f"{rec_id}.pt")
             if os.path.exists(pt_path):
-                x = torch.load(pt_path, map_location='cpu').numpy()
+                cached = torch.load(pt_path, map_location='cpu')
+                if isinstance(cached, dict) and 'signal' in cached:
+                    x = cached['signal'].numpy()
+                else:
+                    x = cached.numpy()
             else:
                 x = _load_signal_mat(mat)
-                x = self._pad_or_trim(x)
+                x, fs_eff = _resample_if_needed(x, fs, self.target_fs)
+                x = _apply_filters(x, fs_eff or (self.target_fs or 500.0), band=self.bandpass_hz, notch_hz=self.notch_hz)
                 x = self._normalize(x)
-                torch.save(torch.from_numpy(x).float(), pt_path)
+                torch.save({'signal': torch.from_numpy(x).float(), 'fs': fs_eff or fs}, pt_path)
         else:
-            x = _load_signal_mat(mat)  # [C, T]
-            x = self._pad_or_trim(x)
+            x = _load_signal_mat(mat)
+            x, fs_eff = _resample_if_needed(x, fs, self.target_fs)
+            x = _apply_filters(x, fs_eff or (self.target_fs or 500.0), band=self.bandpass_hz, notch_hz=self.notch_hz)
             x = self._normalize(x)
+        # seleccionar crop
+        c, t = x.shape
+        if t >= self.sequence_len:
+            if self.eval_mode or not self.random_crop:
+                start = max(0, (t - self.sequence_len)//2)
+            else:
+                rng = np.random.default_rng()
+                start = int(rng.integers(0, max(1, t - self.sequence_len + 1)))
+            x = x[:, start:start+self.sequence_len]
+        else:
+            x = self._pad_or_trim(x)
         x = torch.from_numpy(x).float()
         if self.multilabel and self.hierarchy:
             y_fine = torch.from_numpy(rec[2]).float()
             y_coarse = torch.from_numpy(rec[3]).float()
-            return {'samples': x, 'labels_fine': y_fine, 'labels_coarse': y_coarse, 'hea': hea}
+            return {'samples': x, 'labels_fine': y_fine, 'labels_coarse': y_coarse, 'hea': hea, 'patient_id': extract_patient_id(hea, self.root_dir)}
         else:
             y = torch.tensor(rec[2]).long()
-            return {'samples': x, 'labels': y, 'hea': hea}
+            return {'samples': x, 'labels': y, 'hea': hea, 'patient_id': extract_patient_id(hea, self.root_dir)}
 
 
