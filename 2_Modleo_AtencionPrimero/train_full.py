@@ -18,6 +18,7 @@ except Exception:
         return _autocast_old(enabled=enabled)
 from tqdm import tqdm
 from sklearn.metrics import roc_auc_score, average_precision_score, f1_score
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from ModeloNuevo import ECGHybridVariableBeforeBiTrans
 from datasets.wfdb_dataset import WFDBECGDataset, extract_patient_id
@@ -264,6 +265,7 @@ def main():
 
     # optim / loss
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    scheduler = CosineAnnealingLR(opt, T_max=args.epochs, eta_min=1e-6)  # eta_min es el lr mínimo
     asl = AsymmetricLossMultiLabel(gamma_pos=0, gamma_neg=4, clip=0.05)
     scaler = GradScaler(enabled=args.mixed_precision and device.type=='cuda')
 
@@ -326,6 +328,9 @@ def main():
             torch.save({'model': model.state_dict(), 'opt': opt.state_dict(), 'epoch': epoch},
                        os.path.join(args.exp_dir, 'ckpt_best.pt'))
         print(f"Epoch {epoch} done. Train: {train_mean:.4f} | Val: {val_loss:.4f} (best {best_val:.4f}) | AUROC_macro: {val_metrics.get('auroc_macro', float('nan')):.4f}")
+
+        # Actualizar el learning rate
+        scheduler.step()
 
     # Evaluación en test con mejor checkpoint
     best_ckpt = os.path.join(args.exp_dir, 'ckpt_best.pt')
