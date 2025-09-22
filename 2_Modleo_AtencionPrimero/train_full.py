@@ -211,6 +211,7 @@ def main():
     parser.add_argument('--weight_decay', type=float, default=1e-4)
     parser.add_argument('--epochs', type=int, default=20)
     parser.add_argument('--accum_steps', type=int, default=1)
+    parser.add_argument('--early_stopping_patience', type=int, default=10, help='Épocas sin mejora en val_loss para detener el entrenamiento. 0 para desactivar.')
     parser.add_argument('--mixed_precision', action='store_true')
     parser.add_argument('--cache_dir', type=str, default=os.path.join('datos','pt_cache'))
     parser.add_argument('--exp_dir', type=str, default=os.path.join('experiments_logs','full_run'))
@@ -276,6 +277,7 @@ def main():
             f.write('epoch,train_loss,val_loss,val_auroc_macro,val_auprc_macro,val_f1_macro,lr\n')
 
     best_val = math.inf
+    epochs_no_improve = 0
     for epoch in range(1, args.epochs+1):
         model.train()
         pbar = tqdm(tr_dl, desc=f'Epoch {epoch}/{args.epochs}')
@@ -326,12 +328,21 @@ def main():
                    os.path.join(args.exp_dir, f'ckpt_epoch_{epoch}.pt'))
         if val_loss < best_val:
             best_val = val_loss
+            epochs_no_improve = 0
             torch.save({'model': model.state_dict(), 'opt': opt.state_dict(), 'epoch': epoch},
                        os.path.join(args.exp_dir, 'ckpt_best.pt'))
+        else:
+            epochs_no_improve += 1
+        
         print(f"Epoch {epoch} done. Train: {train_mean:.4f} | Val: {val_loss:.4f} (best {best_val:.4f}) | AUROC_macro: {val_metrics.get('auroc_macro', float('nan')):.4f}")
 
         # Actualizar el learning rate
         scheduler.step()
+
+        # Comprobar Early Stopping
+        if args.early_stopping_patience > 0 and epochs_no_improve >= args.early_stopping_patience:
+            print(f"Early stopping activado tras {args.early_stopping_patience} épocas sin mejora en val_loss.")
+            break
 
     # Evaluación en test con mejor checkpoint
     best_ckpt = os.path.join(args.exp_dir, 'ckpt_best.pt')
