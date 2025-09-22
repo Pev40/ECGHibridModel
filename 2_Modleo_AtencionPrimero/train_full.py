@@ -18,7 +18,7 @@ except Exception:
         return _autocast_old(enabled=enabled)
 from tqdm import tqdm
 from sklearn.metrics import roc_auc_score, average_precision_score, f1_score
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from ModeloNuevo import ECGHybridVariableBeforeBiTrans
 from datasets.wfdb_dataset import WFDBECGDataset, extract_patient_id
@@ -70,7 +70,8 @@ def build_patient_splits(root, seed=42, train_frac=0.7, val_frac=0.15):
 
 
 def build_loaders(sequence_len, hierarchy_path, batch_size, workers, cache_dir=None,
-                  target_fs=500.0, bandpass_hz=(0.5, 45.0), notch_hz=None, seed=42):
+                 target_fs=500.0, bandpass_hz=(0.5, 45.0), notch_hz=None, seed=42,
+                 use_sampler=True, sampler_power=1.0):
     root = os.path.join('datos', 'WFDBRecords')
     tr_files, va_files, te_files = build_patient_splits(root, seed=seed)
 
@@ -89,10 +90,10 @@ def build_loaders(sequence_len, hierarchy_path, batch_size, workers, cache_dir=N
 
     # WeightedRandomSampler según frecuencia de etiquetas fine en el dataset de entrenamiento
     y_fine_list = [s[2] for s in tr_ds.samples]
-    if len(y_fine_list) > 0 and isinstance(y_fine_list[0], np.ndarray):
+    if use_sampler and len(y_fine_list) > 0 and isinstance(y_fine_list[0], np.ndarray):
         y_mat = np.stack(y_fine_list, axis=0)
         class_freq = y_mat.mean(axis=0) + 1e-6
-        inv_freq = 1.0 / class_freq
+        inv_freq = (1.0 / class_freq) ** float(max(0.0, sampler_power))
         inv_freq = inv_freq / inv_freq.sum()
         sample_w = (y_mat * inv_freq).sum(axis=1)
         sample_w = sample_w / (sample_w.mean() + 1e-8)
@@ -199,6 +200,8 @@ def evaluate(model, dl, fine_code_to_idx, coarse_groups, asl, compute_stats=True
         'auroc_micro': float(auroc_micro),
         'auprc_micro': float(auprc_micro),
     })
+    metrics['y_true'] = y_true
+    metrics['y_prob'] = y_prob
     return mean_loss, metrics
 
 
@@ -223,6 +226,11 @@ def main():
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--deterministic', action='store_true')
     parser.add_argument('--dropout', type=float, default=0.3)
+    parser.add_argument('--gamma_pos', type=float, default=0.0)
+    parser.add_argument('--gamma_neg', type=float, default=4.0)
+    parser.add_argument('--asl_clip', type=float, default=0.05)
+    parser.add_argument('--sampler_power', type=float, default=1.0)
+    parser.add_argument('--no_sampler', action='store_true')
     args = parser.parse_args()
 
     set_seed(args.seed, deterministic=args.deterministic)
@@ -255,7 +263,9 @@ def main():
         target_fs=args.target_fs,
         bandpass_hz=(args.bandpass_low, args.bandpass_high),
         notch_hz=(args.notch_hz if args.notch_hz in (50,60) else None),
-        seed=args.seed
+        seed=args.seed,
+        use_sampler=(not args.no_sampler),
+        sampler_power=args.sampler_power
     )
 
     # modelo
@@ -268,8 +278,8 @@ def main():
 
     # optim / loss
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    scheduler = CosineAnnealingLR(opt, T_max=args.epochs, eta_min=1e-6)  # eta_min es el lr mínimo
-    asl = AsymmetricLossMultiLabel(gamma_pos=0, gamma_neg=4, clip=0.05)
+    scheduler = ReduceLROnPlateau(opt, mode='min', factor=0.5, patience=3, threshold=1e-4, cooldown=0, min_lr=1e-6)
+    asl = AsymmetricLossMultiLabel(gamma_pos=args.gamma_pos, gamma_neg=args.gamma_neg, clip=args.asl_clip)
     scaler = GradScaler(enabled=args.mixed_precision and device.type=='cuda')
 
     os.makedirs(args.exp_dir, exist_ok=True)
@@ -338,8 +348,8 @@ def main():
         
         print(f"Epoch {epoch} done. Train: {train_mean:.4f} | Val: {val_loss:.4f} (best {best_val:.4f}) | AUROC_macro: {val_metrics.get('auroc_macro', float('nan')):.4f}")
 
-        # Actualizar el learning rate
-        scheduler.step()
+        # Actualizar el learning rate con ReduceLROnPlateau según val_loss
+        scheduler.step(val_loss)
 
         # Comprobar Early Stopping
         if args.early_stopping_patience > 0 and epochs_no_improve >= args.early_stopping_patience:
@@ -352,8 +362,52 @@ def main():
         state = torch.load(best_ckpt, map_location=device)
         model.load_state_dict(state['model'])
         print('Evaluando en test con mejor checkpoint...')
+        # Optimización de umbrales por clase usando validación si está disponible
+        val_loss_best, val_metrics_best = evaluate(model, va_dl, fine_code_to_idx, coarse_groups, asl, compute_stats=True)
+        y_true_val = val_metrics_best.get('y_true', None)
+        y_prob_val = val_metrics_best.get('y_prob', None)
+        class_thresholds = None
+        if y_true_val is not None and y_prob_val is not None:
+            try:
+                import numpy as np
+                from sklearn.metrics import f1_score
+                c = y_true_val.shape[1]
+                class_thresholds = np.zeros(c, dtype=np.float32)
+                for i in range(c):
+                    yi = y_true_val[:, i]
+                    pi = y_prob_val[:, i]
+                    if yi.sum() == 0:
+                        class_thresholds[i] = 0.5
+                        continue
+                    # búsqueda de umbral óptimo por F1
+                    best_f1 = -1.0
+                    best_t = 0.5
+                    for t in np.linspace(0.05, 0.95, 19):
+                        f1i = f1_score(yi, (pi >= t).astype(np.float32), zero_division=0)
+                        if f1i > best_f1:
+                            best_f1 = f1i
+                            best_t = t
+                    class_thresholds[i] = best_t
+            except Exception:
+                class_thresholds = None
+
         test_loss, test_metrics = evaluate(model, te_dl, fine_code_to_idx, coarse_groups, asl, compute_stats=True)
         print(f"Test loss: {test_loss:.4f} | AUROC_macro: {test_metrics.get('auroc_macro', float('nan')):.4f} | AUPRC_macro: {test_metrics.get('auprc_macro', float('nan')):.4f} | F1_macro: {test_metrics.get('f1_macro', float('nan')):.4f}")
+        # Recalcular F1 usando umbrales por-clase si los tenemos
+        if class_thresholds is not None:
+            try:
+                from sklearn.metrics import f1_score
+                y_true_test = test_metrics.get('y_true')
+                y_prob_test = test_metrics.get('y_prob')
+                if y_true_test is not None and y_prob_test is not None:
+                    y_pred_thr = (y_prob_test >= class_thresholds[None, :]).astype(np.float32)
+                    f1_macro_thr = float(np.nanmean([
+                        f1_score(y_true_test[:, i], y_pred_thr[:, i], zero_division=0) if y_true_test[:, i].sum() > 0 else np.nan
+                        for i in range(y_true_test.shape[1])
+                    ]))
+                    print(f"F1_macro (umbrales por clase): {f1_macro_thr:.4f}")
+            except Exception:
+                pass
         with open(os.path.join(args.exp_dir, 'test_metrics.json'), 'w', encoding='utf-8') as f:
             json.dump({'loss': test_loss, **test_metrics}, f, ensure_ascii=False, indent=2)
     print('Entrenamiento completo.')
