@@ -273,7 +273,7 @@ def main():
     log_path = os.path.join(args.exp_dir, 'train_log.csv')
     if not os.path.exists(log_path):
         with open(log_path, 'w', encoding='utf-8') as f:
-            f.write('epoch,train_loss,val_loss,val_auroc_macro,val_auprc_macro,val_f1_macro\n')
+            f.write('epoch,train_loss,val_loss,val_auroc_macro,val_auprc_macro,val_f1_macro,lr\n')
 
     best_val = math.inf
     for epoch in range(1, args.epochs+1):
@@ -318,8 +318,9 @@ def main():
         # validación
         val_loss, val_metrics = evaluate(model, va_dl, fine_code_to_idx, coarse_groups, asl, compute_stats=True)
         train_mean = train_sum / max(1, train_n)
+        current_lr = opt.param_groups[0]['lr']
         with open(log_path, 'a', encoding='utf-8') as f:
-            f.write(f"{epoch},{train_mean:.6f},{val_loss:.6f},{val_metrics.get('auroc_macro', float('nan')):.6f},{val_metrics.get('auprc_macro', float('nan')):.6f},{val_metrics.get('f1_macro', float('nan')):.6f}\n")
+            f.write(f"{epoch},{train_mean:.6f},{val_loss:.6f},{val_metrics.get('auroc_macro', float('nan')):.6f},{val_metrics.get('auprc_macro', float('nan')):.6f},{val_metrics.get('f1_macro', float('nan')):.6f},{current_lr:.8f}\n")
         # checkpoint
         torch.save({'model': model.state_dict(), 'opt': opt.state_dict(), 'epoch': epoch},
                    os.path.join(args.exp_dir, f'ckpt_epoch_{epoch}.pt'))
