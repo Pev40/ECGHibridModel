@@ -1,4 +1,5 @@
 import os
+import argparse
 from glob import glob
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
@@ -44,26 +45,23 @@ def check_file_integrity(mat_path):
     except Exception as e:
         return f"error al cargar o procesar: {e}"
 
-def main():
-    """Función principal para escanear y reportar archivos problemáticos."""
-    print("Iniciando la verificación de integridad de los datos...")
-    data_root = os.path.join('datos', 'WFDBRecords')
-    
-    # Usamos glob para encontrar todos los archivos .mat de forma recursiva
+def scan_and_report(data_root, report_path=None):
+    """Escanea recursivamente archivos .mat en data_root y guarda reporte si hay problemas.
+
+    Returns:
+        int: cantidad de archivos problemáticos encontrados
+        list[tuple[str,str]]: lista de (ruta, motivo)
+    """
+    report_path = report_path or os.path.join('datos', 'problematic_files.txt')
     all_mat_files = glob(os.path.join(data_root, '**', '*.mat'), recursive=True)
-    
     if not all_mat_files:
         print(f"No se encontraron archivos .mat en el directorio: {data_root}")
-        return
+        return 0, []
 
     print(f"Se encontraron {len(all_mat_files)} archivos .mat para analizar.")
-
     problematic_files = []
-    
-    # Usamos ProcessPoolExecutor para paralelizar la verificación de archivos, es mucho más rápido
     with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
         future_to_file = {executor.submit(check_file_integrity, path): path for path in all_mat_files}
-        
         with tqdm(total=len(all_mat_files), desc="Analizando archivos") as pbar:
             for future in as_completed(future_to_file):
                 path = future_to_file[future]
@@ -72,22 +70,31 @@ def main():
                     problematic_files.append((path, reason))
                 pbar.update(1)
 
-    # Guardar el informe
-    report_path = os.path.join('datos', 'problematic_files.txt')
     if problematic_files:
-        print(f"\n¡Verificación completada! Se encontraron {len(problematic_files)} archivos problemáticos.")
-        print(f"Se ha generado un informe en: {report_path}")
-        
+        os.makedirs(os.path.dirname(report_path), exist_ok=True)
         with open(report_path, 'w', encoding='utf-8') as f:
             f.write("# Informe de integridad de datos\n")
             f.write(f"Total de archivos problemáticos: {len(problematic_files)}\n\n")
             for path, reason in sorted(problematic_files):
                 f.write(f"{path}: {reason}\n")
+        print(f"\n¡Verificación completada! Se encontraron {len(problematic_files)} archivos problemáticos.")
+        print(f"Se ha generado un informe en: {report_path}")
     else:
         print("\n¡Verificación completada! No se encontraron archivos problemáticos.")
-        # Si no hay problemas, podemos borrar un informe antiguo si existe
         if os.path.exists(report_path):
             os.remove(report_path)
+    return len(problematic_files), problematic_files
+
+
+def main():
+    """CLI para escanear y reportar archivos problemáticos."""
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--root', type=str, default=os.path.join('datos', 'WFDBRecords'), help='Directorio raíz donde buscar .mat')
+    ap.add_argument('--report', type=str, default=None, help='Ruta de salida del reporte (txt)')
+    args = ap.parse_args()
+
+    print("Iniciando la verificación de integridad de los datos...")
+    scan_and_report(args.root, report_path=args.report)
 
 if __name__ == '__main__':
     main()

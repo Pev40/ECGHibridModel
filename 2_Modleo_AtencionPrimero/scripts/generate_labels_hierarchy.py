@@ -81,6 +81,45 @@ def assign_to_coarse(code, groups):
     return 'other'
 
 
+def generate_labels_hierarchy(root_dir, output_path, top_k=30, condition_csv=None):
+    """Genera un archivo labels_hierarchy.json a partir de cabeceras WFDB (#Dx).
+
+    Parameters:
+        root_dir (str): Directorio raíz donde buscar recursivamente archivos .hea
+        output_path (str): Ruta de salida para escribir el JSON de jerarquía
+        top_k (int): Número de códigos SNOMED más frecuentes a mantener como fine codes
+        condition_csv (str|None): CSV opcional para mapear SNOMED a nombres/acrónimos (no obligatorio)
+
+    Returns:
+        dict: {'fine_codes': [...], 'coarse_groups': {...}}
+    """
+    hea_files = glob(os.path.join(root_dir, '**', '*.hea'), recursive=True)
+    if not hea_files:
+        raise FileNotFoundError(f'No se encontraron .hea en {root_dir}')
+
+    counter = Counter()
+    for hea in hea_files:
+        labels = parse_header_labels(hea)
+        counter.update(labels)
+
+    stats = counter.most_common()
+    fine_codes = [c for c, _ in stats[:int(top_k)]]
+
+    groups = default_coarse_groups()
+    # asegurar que cualquier fine no mapeado quede en other
+    for c in fine_codes:
+        g = assign_to_coarse(c, groups)
+        if c not in groups[g]:
+            groups[g].add(c)
+
+    groups_out = {g: sorted(list(codes)) for g, codes in groups.items()}
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump({'fine_codes': fine_codes, 'coarse_groups': groups_out}, f, ensure_ascii=False, indent=2)
+    return {'fine_codes': fine_codes, 'coarse_groups': groups_out}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--root', type=str, default=os.path.join('datos', 'WFDBRecords'), help='Directorio raíz de WFDBRecords')
@@ -89,33 +128,12 @@ def main():
     ap.add_argument('--condition_csv', type=str, default=os.path.join('datos', 'ConditionNames_SNOMED-CT.csv'))
     args = ap.parse_args()
 
-    hea_files = glob(os.path.join(args.root, '**', '*.hea'), recursive=True)
-    if not hea_files:
+    try:
+        res = generate_labels_hierarchy(args.root, args.output, top_k=args.top_k, condition_csv=args.condition_csv)
+        print('Escrito', args.output, 'con', len(res['fine_codes']), 'fine codes y', len(res['coarse_groups']), 'grupos')
+    except FileNotFoundError:
         print('No se encontraron .hea en', args.root)
         sys.exit(1)
-
-    counter = Counter()
-    for hea in hea_files:
-        labels = parse_header_labels(hea)
-        counter.update(labels)
-
-    stats = counter.most_common()
-    fine_codes = [c for c, _ in stats[:args.top_k]]
-
-    groups = default_coarse_groups()
-    # aseguremos que cualquier fine no mapeado quede en other
-    for c in fine_codes:
-        g = assign_to_coarse(c, groups)
-        if c not in groups[g]:
-            groups[g].add(c)
-
-    # serializar sets a listas
-    groups_out = {g: sorted(list(codes)) for g, codes in groups.items()}
-
-    os.makedirs(os.path.dirname(args.output), exist_ok=True)
-    with open(args.output, 'w', encoding='utf-8') as f:
-        json.dump({'fine_codes': fine_codes, 'coarse_groups': groups_out}, f, ensure_ascii=False, indent=2)
-    print('Escrito', args.output, 'con', len(fine_codes), 'fine codes y', len(groups_out), 'grupos')
 
 
 if __name__ == '__main__':

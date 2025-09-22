@@ -18,29 +18,34 @@ def parse_scp_dict(s):
     return {}
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument('--root', type=str, default=os.path.join('datos', 'PTBXL'))
-    ap.add_argument('--csv', type=str, default=None)
-    ap.add_argument('--top_k', type=int, default=30)
-    ap.add_argument('--output', type=str, default=None)
-    args = ap.parse_args()
+def generate_ptbxl_hierarchy(root_dir, csv_path=None, top_k=30, output_path=None):
+    """Genera labels_hierarchy.json para PTBXL usando columnas scp_codes.
 
-    csv_path = args.csv or os.path.join(args.root, 'ptbxl_database.csv')
+    Parameters:
+        root_dir (str): Directorio raíz de PTBXL
+        csv_path (str|None): Ruta al CSV ptbxl_database.csv; si None, se toma desde root_dir
+        top_k (int): Número de códigos más frecuentes a incluir como fine
+        output_path (str|None): Ruta de salida; si None, se crea en root_dir
+
+    Returns:
+        dict: {'fine_codes': [...], 'coarse_groups': {...}}
+    """
+    csv_path = csv_path or os.path.join(root_dir, 'ptbxl_database.csv')
     if not os.path.exists(csv_path):
         raise FileNotFoundError(csv_path)
-    out_path = args.output or os.path.join(args.root, 'labels_hierarchy.json')
+    out_path = output_path or os.path.join(root_dir, 'labels_hierarchy.json')
 
     df = pd.read_csv(csv_path)
+    from collections import Counter, defaultdict
     counter = Counter()
     for s in df['scp_codes'].tolist():
         d = parse_scp_dict(s)
         counter.update(d.keys())
 
-    fine_codes = [c for c, _ in counter.most_common(args.top_k)]
+    fine_codes = [c for c, _ in counter.most_common(int(top_k))]
     # agrupar por familias básicas usando scp_statements.csv si existe
     groups = defaultdict(set)
-    scp_map_path = os.path.join(args.root, 'scp_statements.csv')
+    scp_map_path = os.path.join(root_dir, 'scp_statements.csv')
     if os.path.exists(scp_map_path):
         mdf = pd.read_csv(scp_map_path)
         # usar 'diagnostic_class' como coarse
@@ -65,7 +70,20 @@ def main():
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with open(out_path, 'w', encoding='utf-8') as f:
         json.dump({'fine_codes': fine_codes, 'coarse_groups': groups_out}, f, ensure_ascii=False, indent=2)
-    print('Escrito', out_path, 'con', len(fine_codes), 'fine codes y', len(groups_out), 'grupos')
+    return {'fine_codes': fine_codes, 'coarse_groups': groups_out}
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--root', type=str, default=os.path.join('datos', 'PTBXL'))
+    ap.add_argument('--csv', type=str, default=None)
+    ap.add_argument('--top_k', type=int, default=30)
+    ap.add_argument('--output', type=str, default=None)
+    args = ap.parse_args()
+
+    res = generate_ptbxl_hierarchy(args.root, csv_path=args.csv, top_k=args.top_k, output_path=args.output)
+    out_path = args.output or os.path.join(args.root, 'labels_hierarchy.json')
+    print('Escrito', out_path, 'con', len(res['fine_codes']), 'fine codes y', len(res['coarse_groups']), 'grupos')
 
 
 if __name__ == '__main__':

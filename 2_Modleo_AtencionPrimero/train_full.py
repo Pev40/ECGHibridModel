@@ -25,6 +25,20 @@ from datasets.ecg12large import ECG12Large, extract_patient_id
 from datasets import PTBXL, INCART12Lead
 from losses.asymmetric_loss import AsymmetricLossMultiLabel
 
+# Utilidades para verificación y generación de jerarquía
+try:
+    from scripts.check_data_integrity import scan_and_report as _scan_mat_integrity
+except Exception:
+    _scan_mat_integrity = None
+try:
+    from scripts.generate_labels_hierarchy import generate_labels_hierarchy as _gen_wfdb_hierarchy
+except Exception:
+    _gen_wfdb_hierarchy = None
+try:
+    from scripts.generate_ptbxl_labels_hierarchy import generate_ptbxl_hierarchy as _gen_ptbxl_hierarchy
+except Exception:
+    _gen_ptbxl_hierarchy = None
+
 
 def set_seed(seed=42, deterministic=False):
     import random
@@ -298,6 +312,8 @@ def main():
     parser.add_argument('--aug_amp_scale_max', type=float, default=1.0)
     parser.add_argument('--warmup_epochs', type=int, default=5)
     parser.add_argument('--dataset', type=str, default='12large', choices=['12large','ptbxl','georgia','incart'], help='Dataset a usar')
+    parser.add_argument('--no_data_check', action='store_true', help='Desactivar verificación de integridad .mat al inicio')
+    parser.add_argument('--no_auto_hierarchy', action='store_true', help='Desactivar generación automática de labels_hierarchy.json si falta')
     parser.add_argument('--smoke_test', action='store_true', help='Activar modo rápido con pocos ejemplos')
     parser.add_argument('--smoke_n', type=int, default=256, help='Máx ejemplos train en smoke test')
     args = parser.parse_args()
@@ -317,18 +333,43 @@ def main():
         except Exception:
             pass
 
-    # jerarquía
-    # jerarquía por dataset
+    # Definir roots por dataset
     if args.dataset == '12large':
+        data_root = os.path.join('datos', '12Large', 'WFDBRecords')
         hierarchy_path = os.path.join('datos', '12Large', 'labels_hierarchy.json')
     elif args.dataset == 'georgia':
-        # podemos reutilizar jerarquía SNOMED si Georgia usa #Dx con SNOMED
-        hierarchy_path = os.path.join('datos', '12Large', 'labels_hierarchy.json')
+        data_root = os.path.join('datos', 'Georgia12LeadECGDatabase')
+        hierarchy_path = os.path.join('datos', 'Georgia12LeadECGDatabase', 'labels_hierarchy.json')
     elif args.dataset == 'ptbxl':
+        data_root = os.path.join('datos', 'PTBXL')
         hierarchy_path = os.path.join('datos', 'PTBXL', 'labels_hierarchy.json')
-    else:
+    else:  # incart
+        data_root = os.path.join('datos', 'StPetersburgIncart12LeadArrhythmiaDatabase')
         hierarchy_path = os.path.join('datos', 'StPetersburgIncart12LeadArrhythmiaDatabase', 'labels_hierarchy.json')
-    # fallback si no existe la jerarquía específica
+
+    # Verificación de datos (opcional por flag)
+    if not args.no_data_check:
+        if _scan_mat_integrity is None:
+            print('Aviso: verificador de integridad no disponible (scripts/check_data_integrity.py).')
+        else:
+            print(f'Iniciando verificación de integridad en {data_root} ...')
+            try:
+                _ = _scan_mat_integrity(data_root, report_path=os.path.join('datos', f'problematic_files_{args.dataset}.txt'))
+            except Exception as e:
+                print(f'Aviso: la verificación de integridad falló: {e}')
+
+    # Asegurar jerarquía por dataset
+    if not os.path.exists(hierarchy_path) and not args.no_auto_hierarchy:
+        print(f'No se encontró jerarquía en {hierarchy_path}. Intentando generarla automáticamente...')
+        try:
+            if args.dataset == 'ptbxl' and _gen_ptbxl_hierarchy is not None:
+                _gen_ptbxl_hierarchy(data_root)
+            elif _gen_wfdb_hierarchy is not None:
+                _gen_wfdb_hierarchy(data_root, hierarchy_path, top_k=30)
+        except Exception as e:
+            print(f'Aviso: no se pudo generar jerarquía automáticamente: {e}')
+
+    # fallback si no existe la jerarquía específica tras intentar generar
     if not os.path.exists(hierarchy_path):
         fallback_h = os.path.join('datos', '12Large', 'labels_hierarchy.json')
         print(f"No se encontró jerarquía en {hierarchy_path}. Usando fallback: {fallback_h}")
