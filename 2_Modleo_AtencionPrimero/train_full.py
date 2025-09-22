@@ -408,8 +408,14 @@ def main():
                     print(f"F1_macro (umbrales por clase): {f1_macro_thr:.4f}")
             except Exception:
                 pass
+        # Guardar métricas serializables a JSON y arrays por separado en .npz
+        tm = dict(test_metrics)
+        y_true_test = tm.pop('y_true', None)
+        y_prob_test = tm.pop('y_prob', None)
         with open(os.path.join(args.exp_dir, 'test_metrics.json'), 'w', encoding='utf-8') as f:
-            json.dump({'loss': test_loss, **test_metrics}, f, ensure_ascii=False, indent=2)
+            json.dump({'loss': test_loss, **tm}, f, ensure_ascii=False, indent=2)
+        if y_true_test is not None and y_prob_test is not None:
+            np.savez(os.path.join(args.exp_dir, 'test_predictions.npz'), y_true=y_true_test, y_prob=y_prob_test, thresholds=class_thresholds)
     print('Entrenamiento completo.')
 
 
