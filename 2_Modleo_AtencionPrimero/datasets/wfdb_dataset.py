@@ -56,7 +56,7 @@ def build_code_map(hea_files, top_k=10, save_path=None):
 
 class WFDBECGDataset(Dataset):
     def __init__(self, root_dir, sequence_len=5000, code_to_idx=None, files=None, normalize='zscore',
-                 multilabel=False, hierarchy_path=None):
+                 multilabel=False, hierarchy_path=None, cache_dir=None):
         super().__init__()
         self.root_dir = root_dir
         if files is None:
@@ -67,6 +67,7 @@ class WFDBECGDataset(Dataset):
         self.code_to_idx = code_to_idx or {}
         self.normalize = normalize
         self.multilabel = multilabel
+        self.cache_dir = cache_dir
 
         # Jerarquía (opcional)
         self.hierarchy = None
@@ -145,9 +146,22 @@ class WFDBECGDataset(Dataset):
     def __getitem__(self, idx):
         rec = self.samples[idx]
         hea, mat = rec[0], rec[1]
-        x = _load_signal_mat(mat)  # [C, T]
-        x = self._pad_or_trim(x)
-        x = self._normalize(x)
+        # Cache: .pt por registro (opcional)
+        if self.cache_dir:
+            os.makedirs(self.cache_dir, exist_ok=True)
+            rec_id = os.path.relpath(os.path.splitext(mat)[0], self.root_dir).replace(os.sep, '_')
+            pt_path = os.path.join(self.cache_dir, f"{rec_id}.pt")
+            if os.path.exists(pt_path):
+                x = torch.load(pt_path, map_location='cpu').numpy()
+            else:
+                x = _load_signal_mat(mat)
+                x = self._pad_or_trim(x)
+                x = self._normalize(x)
+                torch.save(torch.from_numpy(x).float(), pt_path)
+        else:
+            x = _load_signal_mat(mat)  # [C, T]
+            x = self._pad_or_trim(x)
+            x = self._normalize(x)
         x = torch.from_numpy(x).float()
         if self.multilabel and self.hierarchy:
             y_fine = torch.from_numpy(rec[2]).float()
