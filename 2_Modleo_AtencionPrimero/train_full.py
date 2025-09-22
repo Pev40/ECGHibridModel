@@ -242,6 +242,7 @@ def main():
     parser.add_argument('--aug_lead_drop_prob', type=float, default=0.0)
     parser.add_argument('--aug_amp_scale_min', type=float, default=1.0)
     parser.add_argument('--aug_amp_scale_max', type=float, default=1.0)
+    parser.add_argument('--warmup_epochs', type=int, default=5)
     args = parser.parse_args()
 
     set_seed(args.seed, deterministic=args.deterministic)
@@ -338,6 +339,11 @@ def main():
             if step % args.accum_steps == 0:
                 scaler.unscale_(opt)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                # Warmup: escalar el LR durante las primeras warmup_epochs
+                if epoch <= args.warmup_epochs:
+                    for pg in opt.param_groups:
+                        base_lr = args.lr
+                        pg['lr'] = base_lr * float(epoch) / float(max(1, args.warmup_epochs))
                 scaler.step(opt)
                 scaler.update()
                 opt.zero_grad(set_to_none=True)
@@ -364,8 +370,9 @@ def main():
         
         print(f"Epoch {epoch} done. Train: {train_mean:.4f} | Val: {val_loss:.4f} (best {best_val:.4f}) | AUROC_macro: {val_metrics.get('auroc_macro', float('nan')):.4f}")
 
-        # Actualizar el learning rate con ReduceLROnPlateau según val_loss
-        scheduler.step(val_loss)
+        # Actualizar el learning rate con ReduceLROnPlateau según val_loss (después del warmup)
+        if epoch > args.warmup_epochs:
+            scheduler.step(val_loss)
 
         # Comprobar Early Stopping
         if args.early_stopping_patience > 0 and epochs_no_improve >= args.early_stopping_patience:
