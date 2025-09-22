@@ -21,12 +21,57 @@ python scripts/cache_wfdb_to_pt.py || true
 
 DATASETS=(12large ptbxl georgia incart)
 
+check_dataset_ready() {
+  local ds="$1"
+  case "$ds" in
+    12large)
+      # Requiere .hea bajo datos/12Large/WFDBRecords
+      if find datos/12Large/WFDBRecords -type f -name '*.hea' -print -quit 2>/dev/null | grep -q .; then
+        return 0
+      else
+        echo "[train][SKIP] 12large: no hay .hea en datos/12Large/WFDBRecords" >&2
+        return 1
+      fi
+      ;;
+    ptbxl)
+      # Requiere el CSV principal
+      if [[ -f datos/PTBXL/ptbxl_database.csv ]]; then
+        return 0
+      else
+        echo "[train][SKIP] ptbxl: falta datos/PTBXL/ptbxl_database.csv" >&2
+        return 1
+      fi
+      ;;
+    georgia)
+      # Requiere .hea bajo datos/Georgia12LeadECGDatabase
+      if find datos/Georgia12LeadECGDatabase -type f -name '*.hea' -print -quit 2>/dev/null | grep -q .; then
+        return 0
+      else
+        echo "[train][SKIP] georgia: no hay .hea en datos/Georgia12LeadECGDatabase" >&2
+        return 1
+      fi
+      ;;
+    incart)
+      # Requiere carpeta files con .hea
+      if find datos/StPetersburgIncart12LeadArrhythmiaDatabase/files -type f -name '*.hea' -print -quit 2>/dev/null | grep -q .; then
+        return 0
+      else
+        echo "[train][SKIP] incart: falta carpeta 'files' o .hea en datos/StPetersburgIncart12LeadArrhythmiaDatabase" >&2
+        return 1
+      fi
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 for ds in "${DATASETS[@]}"; do
   EXP_DIR="${EXP_ROOT}/${ds}"
   mkdir -p "${EXP_DIR}"
   echo "[train] Iniciando dataset=${ds} (logs en ${EXP_DIR})"
 
-  if python train_full.py \
+  if check_dataset_ready "${ds}" && python train_full.py \
     --dataset "${ds}" \
     --sequence_len 10000 \
     --batch_size 256 \

@@ -163,18 +163,31 @@ def build_loaders(dataset_name, sequence_len, hierarchy_path, batch_size, worker
 
     # WeightedRandomSampler según frecuencia de etiquetas fine en el dataset de entrenamiento
     y_fine_list = [s[2] for s in tr_ds.samples]
-    if use_sampler and len(y_fine_list) > 0 and isinstance(y_fine_list[0], np.ndarray):
-        y_mat = np.stack(y_fine_list, axis=0)
-        class_freq = y_mat.mean(axis=0) + 1e-6
-        inv_freq = (1.0 / class_freq) ** float(max(0.0, sampler_power))
-        inv_freq = inv_freq / inv_freq.sum()
-        sample_w = (y_mat * inv_freq).sum(axis=1)
-        sample_w = sample_w / (sample_w.mean() + 1e-8)
-        sampler = WeightedRandomSampler(weights=torch.from_numpy(sample_w).float(), num_samples=len(tr_ds), replacement=True)
-        shuffle_train = False
-    else:
+    sampler = None
+    shuffle_train = True
+    # Desactivar sampler para datasets sin etiquetas (p. ej., INCART) o si no hay datos suficientes
+    if dataset_name in ('incart', 'stpetersburg', 'stpetersburgincart12leadarrhythmiadatabase'):
         sampler = None
         shuffle_train = True
+    elif use_sampler and len(y_fine_list) > 0 and isinstance(y_fine_list[0], np.ndarray):
+        y_mat = np.stack(y_fine_list, axis=0)
+        # si todas las etiquetas son cero, no usar sampler
+        if np.sum(y_mat) <= 0:
+            sampler = None
+            shuffle_train = True
+        else:
+            class_freq = y_mat.mean(axis=0) + 1e-6
+            inv_freq = (1.0 / class_freq) ** float(max(0.0, sampler_power))
+            inv_freq = inv_freq / max(1e-12, inv_freq.sum())
+            sample_w = (y_mat * inv_freq).sum(axis=1)
+            # Validar pesos
+            if not np.isfinite(sample_w).all() or sample_w.sum() <= 0:
+                sampler = None
+                shuffle_train = True
+            else:
+                sample_w = sample_w / (sample_w.mean() + 1e-8)
+                sampler = WeightedRandomSampler(weights=torch.from_numpy(sample_w).float(), num_samples=len(tr_ds), replacement=True)
+                shuffle_train = False
 
     tr_dl = DataLoader(tr_ds, batch_size=batch_size, shuffle=shuffle_train, sampler=sampler, num_workers=workers,
                        pin_memory=pin, persistent_workers=(workers>0), prefetch_factor=2 if workers>0 else None)
