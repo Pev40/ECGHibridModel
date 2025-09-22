@@ -159,7 +159,9 @@ def build_code_map(hea_files, top_k=10, save_path=None):
 class WFDBECGDataset(Dataset):
     def __init__(self, root_dir, sequence_len=5000, code_to_idx=None, files=None, normalize='zscore',
                  multilabel=False, hierarchy_path=None, cache_dir=None, random_crop=True,
-                 target_fs=500.0, bandpass_hz=(0.5, 45.0), notch_hz=None, eval_mode=False):
+                 target_fs=500.0, bandpass_hz=(0.5, 45.0), notch_hz=None, eval_mode=False,
+                 aug_jitter_std=0.0, aug_shift_max=0, aug_lead_drop_prob=0.0,
+                 aug_amp_scale_min=1.0, aug_amp_scale_max=1.0):
         super().__init__()
         self.root_dir = root_dir
         if files is None:
@@ -176,6 +178,12 @@ class WFDBECGDataset(Dataset):
         self.target_fs = target_fs
         self.bandpass_hz = bandpass_hz
         self.notch_hz = notch_hz
+        # Augmentaciones (solo en entrenamiento)
+        self.aug_jitter_std = float(aug_jitter_std)
+        self.aug_shift_max = int(aug_shift_max)
+        self.aug_lead_drop_prob = float(aug_lead_drop_prob)
+        self.aug_amp_scale_min = float(aug_amp_scale_min)
+        self.aug_amp_scale_max = float(aug_amp_scale_max)
 
         # Jerarquía (opcional)
         self.hierarchy = None
@@ -292,6 +300,25 @@ class WFDBECGDataset(Dataset):
             x = self._pad_or_trim(x)
 
         x = torch.from_numpy(x).float()
+        # Augmentaciones en modo entrenamiento
+        if not self.eval_mode:
+            # Shift temporal (circular)
+            if self.aug_shift_max > 0:
+                shift = int(np.random.randint(-self.aug_shift_max, self.aug_shift_max + 1))
+                if shift != 0:
+                    x = torch.roll(x, shifts=shift, dims=1)
+            # Jitter gaussiano
+            if self.aug_jitter_std > 0:
+                x = x + torch.randn_like(x) * float(self.aug_jitter_std)
+            # Lead dropout
+            if self.aug_lead_drop_prob > 0:
+                c = x.shape[0]
+                keep_mask = (torch.rand(c) > self.aug_lead_drop_prob).float().to(x.device)
+                x = x * keep_mask.view(-1, 1)
+            # Amplitude scaling
+            if self.aug_amp_scale_max != 1.0 or self.aug_amp_scale_min != 1.0:
+                scale = float(np.random.uniform(self.aug_amp_scale_min, self.aug_amp_scale_max))
+                x = x * scale
         if self.multilabel and self.hierarchy:
             y_fine = torch.from_numpy(rec[2]).float()
             y_coarse = torch.from_numpy(rec[3]).float()

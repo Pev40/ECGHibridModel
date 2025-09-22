@@ -22,7 +22,7 @@ if [[ ! -f datos/labels_hierarchy.json ]]; then
 fi
 
 python train_full.py \
-  --sequence_len 5000 \
+  --sequence_len 10000 \
   --batch_size 256 \
   --workers 16 \
   --lr 1e-3 \
@@ -30,13 +30,18 @@ python train_full.py \
   --epochs 60 \
   --accum_steps 1 \
   --mixed_precision \
-  --dropout 0.3 \
+  --dropout 0.35 \
   --early_stopping_patience 8 \
   --early_stopping_min_delta 5e-4 \
-  --gamma_pos 1.0 \
+  --gamma_pos 2.0 \
   --gamma_neg 4.0 \
   --asl_clip 0.0 \
-  --sampler_power 0.5 \
+  --sampler_power 0.3 \
+  --aug_jitter_std 0.01 \
+  --aug_shift_max 50 \
+  --aug_lead_drop_prob 0.05 \
+  --aug_amp_scale_min 0.9 \
+  --aug_amp_scale_max 1.1 \
   --cache_dir datos/pt_cache \
   --exp_dir "${EXP_DIR}"
 

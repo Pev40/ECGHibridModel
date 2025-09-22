@@ -71,13 +71,18 @@ def build_patient_splits(root, seed=42, train_frac=0.7, val_frac=0.15):
 
 def build_loaders(sequence_len, hierarchy_path, batch_size, workers, cache_dir=None,
                  target_fs=500.0, bandpass_hz=(0.5, 45.0), notch_hz=None, seed=42,
-                 use_sampler=True, sampler_power=1.0):
+                 use_sampler=True, sampler_power=1.0,
+                 aug_jitter_std=0.0, aug_shift_max=0, aug_lead_drop_prob=0.0,
+                 aug_amp_scale_min=1.0, aug_amp_scale_max=1.0):
     root = os.path.join('datos', 'WFDBRecords')
     tr_files, va_files, te_files = build_patient_splits(root, seed=seed)
 
     tr_ds = WFDBECGDataset(root, sequence_len=sequence_len, files=tr_files,
                            multilabel=True, hierarchy_path=hierarchy_path, cache_dir=cache_dir,
-                           random_crop=True, target_fs=target_fs, bandpass_hz=bandpass_hz, notch_hz=notch_hz, eval_mode=False)
+                           random_crop=True, target_fs=target_fs, bandpass_hz=bandpass_hz, notch_hz=notch_hz, eval_mode=False,
+                           aug_jitter_std=aug_jitter_std, aug_shift_max=aug_shift_max,
+                           aug_lead_drop_prob=aug_lead_drop_prob, aug_amp_scale_min=aug_amp_scale_min,
+                           aug_amp_scale_max=aug_amp_scale_max)
     va_ds = WFDBECGDataset(root, sequence_len=sequence_len, files=va_files,
                            multilabel=True, hierarchy_path=hierarchy_path, cache_dir=cache_dir,
                            random_crop=False, target_fs=target_fs, bandpass_hz=bandpass_hz, notch_hz=notch_hz, eval_mode=True)
@@ -231,6 +236,13 @@ def main():
     parser.add_argument('--asl_clip', type=float, default=0.05)
     parser.add_argument('--sampler_power', type=float, default=1.0)
     parser.add_argument('--no_sampler', action='store_true')
+    parser.add_argument('--sequence_len', type=int, default=5000)
+    # Augmentaciones
+    parser.add_argument('--aug_jitter_std', type=float, default=0.0)
+    parser.add_argument('--aug_shift_max', type=int, default=0)
+    parser.add_argument('--aug_lead_drop_prob', type=float, default=0.0)
+    parser.add_argument('--aug_amp_scale_min', type=float, default=1.0)
+    parser.add_argument('--aug_amp_scale_max', type=float, default=1.0)
     args = parser.parse_args()
 
     set_seed(args.seed, deterministic=args.deterministic)
@@ -265,7 +277,12 @@ def main():
         notch_hz=(args.notch_hz if args.notch_hz in (50,60) else None),
         seed=args.seed,
         use_sampler=(not args.no_sampler),
-        sampler_power=args.sampler_power
+        sampler_power=args.sampler_power,
+        aug_jitter_std=args.aug_jitter_std,
+        aug_shift_max=args.aug_shift_max,
+        aug_lead_drop_prob=args.aug_lead_drop_prob,
+        aug_amp_scale_min=args.aug_amp_scale_min,
+        aug_amp_scale_max=args.aug_amp_scale_max
     )
 
     # modelo
