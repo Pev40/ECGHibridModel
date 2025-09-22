@@ -236,7 +236,6 @@ def main():
     parser.add_argument('--asl_clip', type=float, default=0.05)
     parser.add_argument('--sampler_power', type=float, default=1.0)
     parser.add_argument('--no_sampler', action='store_true')
-    parser.add_argument('--sequence_len', type=int, default=5000)
     # Augmentaciones
     parser.add_argument('--aug_jitter_std', type=float, default=0.0)
     parser.add_argument('--aug_shift_max', type=int, default=0)
