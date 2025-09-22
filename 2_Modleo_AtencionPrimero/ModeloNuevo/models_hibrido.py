@@ -2,7 +2,7 @@ import torch
 from torch import nn
 
 # Reutilizamos bloques del ECGTransForm
-from ECGTransForm.models import SEBasicBlock
+from .ecgtransform import SEBasicBlock
 
 # Atención Variable (copia local basada en VTT)
 from .vtt_attention import VariableAttention
@@ -90,7 +90,7 @@ class ECGHybridVariableBeforeBiTrans(nn.Module):
 
         return nn.Sequential(*layers)
 
-    def forward(self, x_in, use_attn=False):
+    def _forward_internal(self, x_in, request_attn=False):
         # CNN multi-escala
         x1 = self.conv1(x_in)
         x2 = self.conv2(x_in)
@@ -111,7 +111,8 @@ class ECGHybridVariableBeforeBiTrans(nn.Module):
         x_tok = x_tok.permute(0, 3, 1, 2)  # [B, T, F, D]
 
         # Atención Variable (entre derivaciones)
-        x_tok, _ = self.var_attn(x_tok, use_attn=use_attn)  # [B, T, F, D]
+        attn = None
+        x_tok, attn = self.var_attn(x_tok, use_attn=request_attn)  # [B, T, F, D]
 
         # Pooling sobre F para BiTrans: media simple
         x_var = x_tok.mean(dim=2)  # [B, T, D]
@@ -129,6 +130,14 @@ class ECGHybridVariableBeforeBiTrans(nn.Module):
             raise RuntimeError('Configure num_coarse y num_fine en configs antes de usar el modelo')
         logits_coarse = self.head_coarse(x_flat)
         logits_fine = self.head_fine(x_flat)
+        return logits_coarse, logits_fine, attn
+
+    def forward(self, x_in, use_attn=False):
+        logits_coarse, logits_fine, _ = self._forward_internal(x_in, request_attn=use_attn)
         return logits_coarse, logits_fine
+
+    def forward_with_attn(self, x_in):
+        logits_coarse, logits_fine, attn = self._forward_internal(x_in, request_attn=True)
+        return logits_coarse, logits_fine, attn
 
 

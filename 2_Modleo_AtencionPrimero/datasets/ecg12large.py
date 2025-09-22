@@ -156,7 +156,7 @@ def build_code_map(hea_files, top_k=10, save_path=None):
     return code_to_idx
 
 
-class WFDBECGDataset(Dataset):
+class ECG12Large(Dataset):
     def __init__(self, root_dir, sequence_len=5000, code_to_idx=None, files=None, normalize='zscore',
                  multilabel=False, hierarchy_path=None, cache_dir=None, random_crop=True,
                  target_fs=500.0, bandpass_hz=(0.5, 45.0), notch_hz=None, eval_mode=False,

@@ -21,7 +21,8 @@ from sklearn.metrics import roc_auc_score, average_precision_score, f1_score
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from ModeloNuevo import ECGHybridVariableBeforeBiTrans
-from datasets.wfdb_dataset import WFDBECGDataset, extract_patient_id
+from datasets.ecg12large import ECG12Large, extract_patient_id
+from datasets import PTBXL, INCART12Lead
 from losses.asymmetric_loss import AsymmetricLossMultiLabel
 
 
@@ -69,26 +70,79 @@ def build_patient_splits(root, seed=42, train_frac=0.7, val_frac=0.15):
     return tr_files, va_files, te_files
 
 
-def build_loaders(sequence_len, hierarchy_path, batch_size, workers, cache_dir=None,
+def build_loaders(dataset_name, sequence_len, hierarchy_path, batch_size, workers, cache_dir=None,
                  target_fs=500.0, bandpass_hz=(0.5, 45.0), notch_hz=None, seed=42,
                  use_sampler=True, sampler_power=1.0,
                  aug_jitter_std=0.0, aug_shift_max=0, aug_lead_drop_prob=0.0,
-                 aug_amp_scale_min=1.0, aug_amp_scale_max=1.0):
-    root = os.path.join('datos', 'WFDBRecords')
-    tr_files, va_files, te_files = build_patient_splits(root, seed=seed)
-
-    tr_ds = WFDBECGDataset(root, sequence_len=sequence_len, files=tr_files,
-                           multilabel=True, hierarchy_path=hierarchy_path, cache_dir=cache_dir,
-                           random_crop=True, target_fs=target_fs, bandpass_hz=bandpass_hz, notch_hz=notch_hz, eval_mode=False,
-                           aug_jitter_std=aug_jitter_std, aug_shift_max=aug_shift_max,
-                           aug_lead_drop_prob=aug_lead_drop_prob, aug_amp_scale_min=aug_amp_scale_min,
-                           aug_amp_scale_max=aug_amp_scale_max)
-    va_ds = WFDBECGDataset(root, sequence_len=sequence_len, files=va_files,
-                           multilabel=True, hierarchy_path=hierarchy_path, cache_dir=cache_dir,
-                           random_crop=False, target_fs=target_fs, bandpass_hz=bandpass_hz, notch_hz=notch_hz, eval_mode=True)
-    te_ds = WFDBECGDataset(root, sequence_len=sequence_len, files=te_files,
-                           multilabel=True, hierarchy_path=hierarchy_path, cache_dir=cache_dir,
-                           random_crop=False, target_fs=target_fs, bandpass_hz=bandpass_hz, notch_hz=notch_hz, eval_mode=True)
+                 aug_amp_scale_min=1.0, aug_amp_scale_max=1.0,
+                 smoke_test=False, smoke_n=256):
+    dataset_name = str(dataset_name).lower()
+    if dataset_name in ('12large', 'ecg12large', 'wfdbrecords'):
+        root = os.path.join('datos', '12Large', 'WFDBRecords')
+        tr_files, va_files, te_files = build_patient_splits(root, seed=seed)
+        tr_ds = ECG12Large(root, sequence_len=sequence_len, files=tr_files[:smoke_n] if smoke_test else tr_files,
+                              multilabel=True, hierarchy_path=hierarchy_path, cache_dir=cache_dir,
+                              random_crop=True, target_fs=target_fs, bandpass_hz=bandpass_hz, notch_hz=notch_hz, eval_mode=False,
+                              aug_jitter_std=aug_jitter_std, aug_shift_max=aug_shift_max,
+                              aug_lead_drop_prob=aug_lead_drop_prob, aug_amp_scale_min=aug_amp_scale_min,
+                              aug_amp_scale_max=aug_amp_scale_max)
+        va_ds = ECG12Large(root, sequence_len=sequence_len, files=va_files[:max(1, smoke_n//4)] if smoke_test else va_files,
+                              multilabel=True, hierarchy_path=hierarchy_path, cache_dir=cache_dir,
+                              random_crop=False, target_fs=target_fs, bandpass_hz=bandpass_hz, notch_hz=notch_hz, eval_mode=True)
+        te_ds = ECG12Large(root, sequence_len=sequence_len, files=te_files[:max(1, smoke_n//4)] if smoke_test else te_files,
+                              multilabel=True, hierarchy_path=hierarchy_path, cache_dir=cache_dir,
+                              random_crop=False, target_fs=target_fs, bandpass_hz=bandpass_hz, notch_hz=notch_hz, eval_mode=True)
+    elif dataset_name in ('ptbxl', 'ptb-xl') and PTBXL is not None:
+        root = os.path.join('datos', 'PTBXL')
+        tr_ds = PTBXL(root, split='train', sequence_len=sequence_len, hierarchy_path=hierarchy_path, cache_dir=cache_dir,
+                      target_fs=target_fs, bandpass_hz=bandpass_hz, notch_hz=notch_hz, random_crop=True, eval_mode=False,
+                      aug_jitter_std=aug_jitter_std, aug_shift_max=aug_shift_max, aug_lead_drop_prob=aug_lead_drop_prob,
+                      aug_amp_scale_min=aug_amp_scale_min, aug_amp_scale_max=aug_amp_scale_max)
+        if smoke_test and hasattr(tr_ds, 'samples'):
+            tr_ds.samples = tr_ds.samples[:smoke_n]
+        va_ds = PTBXL(root, split='val', sequence_len=sequence_len, hierarchy_path=hierarchy_path, cache_dir=cache_dir,
+                      target_fs=target_fs, bandpass_hz=bandpass_hz, notch_hz=notch_hz, random_crop=False, eval_mode=True)
+        if smoke_test and hasattr(va_ds, 'samples'):
+            va_ds.samples = va_ds.samples[:max(1, smoke_n//4)]
+        te_ds = PTBXL(root, split='test', sequence_len=sequence_len, hierarchy_path=hierarchy_path, cache_dir=cache_dir,
+                      target_fs=target_fs, bandpass_hz=bandpass_hz, notch_hz=notch_hz, random_crop=False, eval_mode=True)
+        if smoke_test and hasattr(te_ds, 'samples'):
+            te_ds.samples = te_ds.samples[:max(1, smoke_n//4)]
+    elif dataset_name in ('incart', 'stpetersburg', 'stpetersburgincart12leadarrhythmiadatabase') and INCART12Lead is not None:
+        root = os.path.join('datos', 'StPetersburgIncart12LeadArrhythmiaDatabase')
+        tr_ds = INCART12Lead(root, split='train', sequence_len=sequence_len, hierarchy_path=hierarchy_path, cache_dir=cache_dir,
+                             target_fs=257.0, bandpass_hz=bandpass_hz, notch_hz=notch_hz, random_crop=True, eval_mode=False,
+                             aug_jitter_std=aug_jitter_std, aug_shift_max=aug_shift_max, aug_lead_drop_prob=aug_lead_drop_prob,
+                             aug_amp_scale_min=aug_amp_scale_min, aug_amp_scale_max=aug_amp_scale_max)
+        if smoke_test and hasattr(tr_ds, 'samples'):
+            tr_ds.samples = tr_ds.samples[:smoke_n]
+        va_ds = INCART12Lead(root, split='val', sequence_len=sequence_len, hierarchy_path=hierarchy_path, cache_dir=cache_dir,
+                             target_fs=257.0, bandpass_hz=bandpass_hz, notch_hz=notch_hz, random_crop=False, eval_mode=True)
+        if smoke_test and hasattr(va_ds, 'samples'):
+            va_ds.samples = va_ds.samples[:max(1, smoke_n//4)]
+        te_ds = INCART12Lead(root, split='test', sequence_len=sequence_len, hierarchy_path=hierarchy_path, cache_dir=cache_dir,
+                             target_fs=257.0, bandpass_hz=bandpass_hz, notch_hz=notch_hz, random_crop=False, eval_mode=True)
+        if smoke_test and hasattr(te_ds, 'samples'):
+            te_ds.samples = te_ds.samples[:max(1, smoke_n//4)]
+    elif dataset_name in ('georgia', 'georgia12leadecgdatabase'):
+        root = os.path.join('datos', 'Georgia12LeadECGDatabase')
+        hea_files = glob(os.path.join(root, '*.hea'))
+        # split por paciente usando utilidad existente
+        tr_files, va_files, te_files = build_patient_splits(root, seed=seed)
+        tr_ds = ECG12Large(root, sequence_len=sequence_len, files=tr_files[:smoke_n] if smoke_test else tr_files,
+                              multilabel=True, hierarchy_path=hierarchy_path, cache_dir=cache_dir,
+                              random_crop=True, target_fs=target_fs, bandpass_hz=bandpass_hz, notch_hz=notch_hz, eval_mode=False,
+                              aug_jitter_std=aug_jitter_std, aug_shift_max=aug_shift_max,
+                              aug_lead_drop_prob=aug_lead_drop_prob, aug_amp_scale_min=aug_amp_scale_min,
+                              aug_amp_scale_max=aug_amp_scale_max)
+        va_ds = ECG12Large(root, sequence_len=sequence_len, files=va_files[:max(1, smoke_n//4)] if smoke_test else va_files,
+                              multilabel=True, hierarchy_path=hierarchy_path, cache_dir=cache_dir,
+                              random_crop=False, target_fs=target_fs, bandpass_hz=bandpass_hz, notch_hz=notch_hz, eval_mode=True)
+        te_ds = ECG12Large(root, sequence_len=sequence_len, files=te_files[:max(1, smoke_n//4)] if smoke_test else te_files,
+                              multilabel=True, hierarchy_path=hierarchy_path, cache_dir=cache_dir,
+                              random_crop=False, target_fs=target_fs, bandpass_hz=bandpass_hz, notch_hz=notch_hz, eval_mode=True)
+    else:
+        raise ValueError(f"Dataset no soportado: {dataset_name}")
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     pin = device.type == 'cuda'
@@ -243,6 +297,9 @@ def main():
     parser.add_argument('--aug_amp_scale_min', type=float, default=1.0)
     parser.add_argument('--aug_amp_scale_max', type=float, default=1.0)
     parser.add_argument('--warmup_epochs', type=int, default=5)
+    parser.add_argument('--dataset', type=str, default='12large', choices=['12large','ptbxl','georgia','incart'], help='Dataset a usar')
+    parser.add_argument('--smoke_test', action='store_true', help='Activar modo rápido con pocos ejemplos')
+    parser.add_argument('--smoke_n', type=int, default=256, help='Máx ejemplos train en smoke test')
     args = parser.parse_args()
 
     set_seed(args.seed, deterministic=args.deterministic)
@@ -261,7 +318,21 @@ def main():
             pass
 
     # jerarquía
-    hierarchy_path = os.path.join('datos', 'labels_hierarchy.json')
+    # jerarquía por dataset
+    if args.dataset == '12large':
+        hierarchy_path = os.path.join('datos', '12Large', 'labels_hierarchy.json')
+    elif args.dataset == 'georgia':
+        # podemos reutilizar jerarquía SNOMED si Georgia usa #Dx con SNOMED
+        hierarchy_path = os.path.join('datos', '12Large', 'labels_hierarchy.json')
+    elif args.dataset == 'ptbxl':
+        hierarchy_path = os.path.join('datos', 'PTBXL', 'labels_hierarchy.json')
+    else:
+        hierarchy_path = os.path.join('datos', 'StPetersburgIncart12LeadArrhythmiaDatabase', 'labels_hierarchy.json')
+    # fallback si no existe la jerarquía específica
+    if not os.path.exists(hierarchy_path):
+        fallback_h = os.path.join('datos', '12Large', 'labels_hierarchy.json')
+        print(f"No se encontró jerarquía en {hierarchy_path}. Usando fallback: {fallback_h}")
+        hierarchy_path = fallback_h
     with open(hierarchy_path, 'r', encoding='utf-8') as f:
         hier = json.load(f)
     fine_codes = hier['fine_codes']
@@ -270,7 +341,7 @@ def main():
 
     # loaders
     tr_dl, va_dl, te_dl = build_loaders(
-        args.sequence_len, hierarchy_path, args.batch_size, args.workers,
+        args.dataset, args.sequence_len, hierarchy_path, args.batch_size, args.workers,
         cache_dir=args.cache_dir,
         target_fs=args.target_fs,
         bandpass_hz=(args.bandpass_low, args.bandpass_high),
@@ -282,7 +353,9 @@ def main():
         aug_shift_max=args.aug_shift_max,
         aug_lead_drop_prob=args.aug_lead_drop_prob,
         aug_amp_scale_min=args.aug_amp_scale_min,
-        aug_amp_scale_max=args.aug_amp_scale_max
+        aug_amp_scale_max=args.aug_amp_scale_max,
+        smoke_test=args.smoke_test,
+        smoke_n=args.smoke_n
     )
 
     # modelo
@@ -299,15 +372,18 @@ def main():
     asl = AsymmetricLossMultiLabel(gamma_pos=args.gamma_pos, gamma_neg=args.gamma_neg, clip=args.asl_clip)
     scaler = GradScaler(enabled=args.mixed_precision and device.type=='cuda')
 
-    os.makedirs(args.exp_dir, exist_ok=True)
-    log_path = os.path.join(args.exp_dir, 'train_log.csv')
+    # carpeta de experimento por dataset
+    exp_root = os.path.join(args.exp_dir, args.dataset)
+    os.makedirs(exp_root, exist_ok=True)
+    log_path = os.path.join(exp_root, 'train_log.csv')
     if not os.path.exists(log_path):
         with open(log_path, 'w', encoding='utf-8') as f:
             f.write('epoch,train_loss,val_loss,val_auroc_macro,val_auprc_macro,val_f1_macro,lr\n')
 
     best_val = math.inf
     epochs_no_improve = 0
-    for epoch in range(1, args.epochs+1):
+    max_epochs = min(args.epochs, 2) if args.smoke_test else args.epochs
+    for epoch in range(1, max_epochs+1):
         model.train()
         pbar = tqdm(tr_dl, desc=f'Epoch {epoch}/{args.epochs}')
         opt.zero_grad(set_to_none=True)
@@ -359,12 +435,12 @@ def main():
             f.write(f"{epoch},{train_mean:.6f},{val_loss:.6f},{val_metrics.get('auroc_macro', float('nan')):.6f},{val_metrics.get('auprc_macro', float('nan')):.6f},{val_metrics.get('f1_macro', float('nan')):.6f},{current_lr:.8f}\n")
         # checkpoint
         torch.save({'model': model.state_dict(), 'opt': opt.state_dict(), 'epoch': epoch},
-                   os.path.join(args.exp_dir, f'ckpt_epoch_{epoch}.pt'))
+                   os.path.join(exp_root, f'ckpt_epoch_{epoch}.pt'))
         if val_loss < best_val - args.early_stopping_min_delta:
             best_val = val_loss
             epochs_no_improve = 0
             torch.save({'model': model.state_dict(), 'opt': opt.state_dict(), 'epoch': epoch},
-                       os.path.join(args.exp_dir, 'ckpt_best.pt'))
+                       os.path.join(exp_root, 'ckpt_best.pt'))
         else:
             epochs_no_improve += 1
         
@@ -380,7 +456,7 @@ def main():
             break
 
     # Evaluación en test con mejor checkpoint
-    best_ckpt = os.path.join(args.exp_dir, 'ckpt_best.pt')
+    best_ckpt = os.path.join(exp_root, 'ckpt_best.pt')
     if os.path.exists(best_ckpt):
         state = torch.load(best_ckpt, map_location=device)
         model.load_state_dict(state['model'])
@@ -414,6 +490,7 @@ def main():
             except Exception:
                 class_thresholds = None
 
+        # TTA/Multi-crop en test: promediar probabilidades de k ventanas si la señal es > sequence_len
         test_loss, test_metrics = evaluate(model, te_dl, fine_code_to_idx, coarse_groups, asl, compute_stats=True)
         print(f"Test loss: {test_loss:.4f} | AUROC_macro: {test_metrics.get('auroc_macro', float('nan')):.4f} | AUPRC_macro: {test_metrics.get('auprc_macro', float('nan')):.4f} | F1_macro: {test_metrics.get('f1_macro', float('nan')):.4f}")
         # Recalcular F1 usando umbrales por-clase si los tenemos
@@ -435,10 +512,10 @@ def main():
         tm = dict(test_metrics)
         y_true_test = tm.pop('y_true', None)
         y_prob_test = tm.pop('y_prob', None)
-        with open(os.path.join(args.exp_dir, 'test_metrics.json'), 'w', encoding='utf-8') as f:
+        with open(os.path.join(exp_root, 'test_metrics.json'), 'w', encoding='utf-8') as f:
             json.dump({'loss': test_loss, **tm}, f, ensure_ascii=False, indent=2)
         if y_true_test is not None and y_prob_test is not None:
-            np.savez(os.path.join(args.exp_dir, 'test_predictions.npz'), y_true=y_true_test, y_prob=y_prob_test, thresholds=class_thresholds)
+            np.savez(os.path.join(exp_root, 'test_predictions.npz'), y_true=y_true_test, y_prob=y_prob_test, thresholds=class_thresholds)
     print('Entrenamiento completo.')
 
 

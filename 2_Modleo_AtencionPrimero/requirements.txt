@@ -11,4 +11,5 @@ pyyaml>=6.0.1
 wfdb>=3.4.1
 h5py>=3.8.0
 tqdm>=4.66.0
+PyWavelets>=1.5.0
 
