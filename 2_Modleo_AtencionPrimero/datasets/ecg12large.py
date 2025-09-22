@@ -281,7 +281,36 @@ class ECG12Large(Dataset):
                 x, fs_eff = _resample_if_needed(x, fs, self.target_fs)
                 x = _apply_filters(x, fs_eff or (self.target_fs or 500.0), band=self.bandpass_hz, notch_hz=self.notch_hz)
                 x = self._normalize(x)
-                torch.save({'signal': torch.from_numpy(x).float(), 'fs': fs_eff or fs}, pt_path)
+                # Escritura atómica y tolerante a concurrencia
+                tmp_path = pt_path + f".tmp.{os.getpid()}"
+                try:
+                    torch.save({'signal': torch.from_numpy(x).float(), 'fs': fs_eff or fs}, tmp_path)
+                    try:
+                        os.replace(tmp_path, pt_path)
+                    except Exception:
+                        # Si otro worker ya escribió el archivo, ignorar
+                        if os.path.exists(tmp_path):
+                            try:
+                                os.remove(tmp_path)
+                            except Exception:
+                                pass
+                except Exception:
+                    # Si guardar falla por acceso concurrente, intentamos leer lo que ya exista
+                    try:
+                        if os.path.exists(tmp_path):
+                            try:
+                                os.remove(tmp_path)
+                            except Exception:
+                                pass
+                        if os.path.exists(pt_path):
+                            cached = torch.load(pt_path, map_location='cpu')
+                            if isinstance(cached, dict) and 'signal' in cached:
+                                x = cached['signal'].numpy()
+                            else:
+                                x = cached.numpy()
+                    except Exception:
+                        # Continuar con x en memoria sin cachear
+                        pass
         else:
             x = _load_signal_mat(mat)
             x, fs_eff = _resample_if_needed(x, fs, self.target_fs)
