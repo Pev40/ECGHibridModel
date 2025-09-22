@@ -290,6 +290,7 @@ class WFDBECGDataset(Dataset):
             x = x[:, start:start+self.sequence_len]
         else:
             x = self._pad_or_trim(x)
+
         x = torch.from_numpy(x).float()
         if self.multilabel and self.hierarchy:
             y_fine = torch.from_numpy(rec[2]).float()
