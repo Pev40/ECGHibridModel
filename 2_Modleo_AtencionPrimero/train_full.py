@@ -212,6 +212,7 @@ def main():
     parser.add_argument('--epochs', type=int, default=20)
     parser.add_argument('--accum_steps', type=int, default=1)
     parser.add_argument('--early_stopping_patience', type=int, default=10, help='Épocas sin mejora en val_loss para detener el entrenamiento. 0 para desactivar.')
+    parser.add_argument('--early_stopping_min_delta', type=float, default=1e-4, help='Mejora mínima en val_loss para resetear la paciencia.')
     parser.add_argument('--mixed_precision', action='store_true')
     parser.add_argument('--cache_dir', type=str, default=os.path.join('datos','pt_cache'))
     parser.add_argument('--exp_dir', type=str, default=os.path.join('experiments_logs','full_run'))
@@ -221,6 +222,7 @@ def main():
     parser.add_argument('--notch_hz', type=int, default=0, help='50 o 60; 0 para desactivar')
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--deterministic', action='store_true')
+    parser.add_argument('--dropout', type=float, default=0.3)
     args = parser.parse_args()
 
     set_seed(args.seed, deterministic=args.deterministic)
@@ -258,7 +260,7 @@ def main():
 
     # modelo
     configs = type('Cfg', (), dict(
-        input_channels=12, sequence_len=args.sequence_len, kernel_size=8, stride=1, dropout=0.2,
+        input_channels=12, sequence_len=args.sequence_len, kernel_size=8, stride=1, dropout=args.dropout,
         mid_channels=32, final_out_channels=128, trans_dim=32, num_heads=4, num_leads=12,
         num_fine=len(fine_codes), num_coarse=len(coarse_groups)
     ))
@@ -326,7 +328,7 @@ def main():
         # checkpoint
         torch.save({'model': model.state_dict(), 'opt': opt.state_dict(), 'epoch': epoch},
                    os.path.join(args.exp_dir, f'ckpt_epoch_{epoch}.pt'))
-        if val_loss < best_val:
+        if val_loss < best_val - args.early_stopping_min_delta:
             best_val = val_loss
             epochs_no_improve = 0
             torch.save({'model': model.state_dict(), 'opt': opt.state_dict(), 'epoch': epoch},
@@ -341,7 +343,7 @@ def main():
 
         # Comprobar Early Stopping
         if args.early_stopping_patience > 0 and epochs_no_improve >= args.early_stopping_patience:
-            print(f"Early stopping activado tras {args.early_stopping_patience} épocas sin mejora en val_loss.")
+            print(f"Early stopping activado tras {args.early_stopping_patience} épocas sin mejora ≥ {args.early_stopping_min_delta} en val_loss.")
             break
 
     # Evaluación en test con mejor checkpoint
