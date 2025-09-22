@@ -6,7 +6,7 @@ set -euo pipefail
 # Defaults: venv_name=venv, torch channel=cu121
 
 VENV_NAME="${1:-venv}"
-TORCH_CHANNEL="${2:-cu121}"
+TORCH_CHANNEL="${2:-cu129}"
 
 echo "[setup] Creating venv: ${VENV_NAME}"
 python3 -m venv "${VENV_NAME}"
