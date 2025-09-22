@@ -62,10 +62,16 @@ class ECGHybridVariableBeforeBiTrans(nn.Module):
         self.encoder_layer = nn.TransformerEncoderLayer(d_model=self.d_model, nhead=self.num_heads, batch_first=True)
         self.transformer_encoder = nn.TransformerEncoder(self.encoder_layer, num_layers=3)
 
-        # Clasificador
+        # Cabezas de clasificación (coarse y fine)
         self.aap = nn.AdaptiveAvgPool1d(1)
-        # Clasificador: entrada = d_model tras AAP
-        self.clf = nn.Linear(self.d_model, configs.num_classes)
+        self.num_coarse = getattr(configs, 'num_coarse', None)
+        self.num_fine = getattr(configs, 'num_fine', None)
+        if (self.num_coarse is not None) and (self.num_fine is not None):
+            self.head_coarse = nn.Linear(self.d_model, self.num_coarse)
+            self.head_fine = nn.Linear(self.d_model, self.num_fine)
+        else:
+            self.head_coarse = None
+            self.head_fine = None
 
     def _make_layer(self, block, planes, blocks, stride=1):
         downsample = None
@@ -119,7 +125,10 @@ class ECGHybridVariableBeforeBiTrans(nn.Module):
         x_bt = x_bt.permute(0, 2, 1)  # [B, D, T]
         x_bt = self.aap(x_bt)  # [B, D, 1]
         x_flat = x_bt.reshape(x_bt.shape[0], -1)
-        x_out = self.clf(x_flat)
-        return x_out
+        if (self.head_coarse is None) or (self.head_fine is None):
+            raise RuntimeError('Configure num_coarse y num_fine en configs antes de usar el modelo')
+        logits_coarse = self.head_coarse(x_flat)
+        logits_fine = self.head_fine(x_flat)
+        return logits_coarse, logits_fine
 
 

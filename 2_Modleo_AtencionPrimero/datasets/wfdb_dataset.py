@@ -55,7 +55,8 @@ def build_code_map(hea_files, top_k=10, save_path=None):
 
 
 class WFDBECGDataset(Dataset):
-    def __init__(self, root_dir, sequence_len=5000, code_to_idx=None, files=None, normalize='zscore'):
+    def __init__(self, root_dir, sequence_len=5000, code_to_idx=None, files=None, normalize='zscore',
+                 multilabel=False, hierarchy_path=None):
         super().__init__()
         self.root_dir = root_dir
         if files is None:
@@ -65,6 +66,18 @@ class WFDBECGDataset(Dataset):
         self.sequence_len = sequence_len
         self.code_to_idx = code_to_idx or {}
         self.normalize = normalize
+        self.multilabel = multilabel
+
+        # Jerarquía (opcional)
+        self.hierarchy = None
+        if hierarchy_path and os.path.exists(hierarchy_path):
+            with open(hierarchy_path, 'r', encoding='utf-8') as f:
+                self.hierarchy = json.load(f)
+            self.fine_codes = self.hierarchy.get('fine_codes', [])
+            self.fine_code_to_idx = {c: i for i, c in enumerate(self.fine_codes)}
+            self.coarse_groups = self.hierarchy.get('coarse_groups', {})
+            self.coarse_names = list(self.coarse_groups.keys())
+            self.coarse_name_to_idx = {g: i for i, g in enumerate(self.coarse_names)}
 
         # filtrar a ejemplos que tengan .mat
         self.pairs = []
@@ -74,20 +87,39 @@ class WFDBECGDataset(Dataset):
                 self.pairs.append((hea, mat))
 
         # si no hay code_map, derivar de los archivos presentes (top 10)
-        if not self.code_to_idx:
+        if not self.code_to_idx and not self.multilabel:
             self.code_to_idx = build_code_map([p[0] for p in self.pairs], top_k=10)
 
         # filtrar pares sin label mapeable
         self.samples = []
         for hea, mat in self.pairs:
             labels = _parse_header_labels(hea)
-            idx = None
-            for code in labels:
-                if code in self.code_to_idx:
-                    idx = self.code_to_idx[code]
-                    break
-            if idx is not None:
-                self.samples.append((hea, mat, idx))
+            if self.multilabel and self.hierarchy:
+                # vector fine
+                y_fine = np.zeros(len(self.fine_codes), dtype=np.float32)
+                for code in labels:
+                    if code in self.fine_code_to_idx:
+                        y_fine[self.fine_code_to_idx[code]] = 1.0
+                if y_fine.sum() == 0:
+                    continue
+                # vector coarse derivado
+                y_coarse = np.zeros(len(self.coarse_names), dtype=np.float32)
+                for g_idx, g in enumerate(self.coarse_names):
+                    group_codes = set(self.coarse_groups[g])
+                    # activar coarse si alguna fine del grupo está activa
+                    for code in labels:
+                        if code in group_codes:
+                            y_coarse[g_idx] = 1.0
+                            break
+                self.samples.append((hea, mat, y_fine, y_coarse))
+            else:
+                idx = None
+                for code in labels:
+                    if code in self.code_to_idx:
+                        idx = self.code_to_idx[code]
+                        break
+                if idx is not None:
+                    self.samples.append((hea, mat, idx))
 
     def __len__(self):
         return len(self.samples)
@@ -111,12 +143,18 @@ class WFDBECGDataset(Dataset):
         return x
 
     def __getitem__(self, idx):
-        hea, mat, y = self.samples[idx]
+        rec = self.samples[idx]
+        hea, mat = rec[0], rec[1]
         x = _load_signal_mat(mat)  # [C, T]
         x = self._pad_or_trim(x)
         x = self._normalize(x)
         x = torch.from_numpy(x).float()
-        y = torch.tensor(y).long()
-        return {'samples': x, 'labels': y, 'hea': hea}
+        if self.multilabel and self.hierarchy:
+            y_fine = torch.from_numpy(rec[2]).float()
+            y_coarse = torch.from_numpy(rec[3]).float()
+            return {'samples': x, 'labels_fine': y_fine, 'labels_coarse': y_coarse, 'hea': hea}
+        else:
+            y = torch.tensor(rec[2]).long()
+            return {'samples': x, 'labels': y, 'hea': hea}
 
 
