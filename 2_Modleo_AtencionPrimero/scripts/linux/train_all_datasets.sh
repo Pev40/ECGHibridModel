@@ -126,7 +126,7 @@ PY
 
   if check_dataset_ready "${ds}" && python train_full.py \
     --dataset "${ds}" \
-    --sequence_len 10000 \
+    --sequence_len 5000 \
     --batch_size 256 \
     --workers 16 \
     --lr 1e-3 \
