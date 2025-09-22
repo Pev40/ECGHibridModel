@@ -19,7 +19,7 @@ mkdir -p "${EXP_ROOT}" datos/pt_cache || true
 # Opcional: pre-cachear (si el script existe)
 python scripts/cache_wfdb_to_pt.py || true
 
-DATASETS=(12large ptbxl georgia incart)
+DATASETS=(12large ptbxl georgia)
 
 check_dataset_ready() {
   local ds="$1"
@@ -99,6 +99,28 @@ PY
         fi
       fi
       EXTRA_FLAGS+=(--no_sampler --no_auto_hierarchy)
+      # Verificar si existen etiquetas positivas utilizables; si no, omitir entrenamiento supervisado
+      HAS_LABELS=$(python - <<'PY'
+import json, os, numpy as np
+try:
+    from datasets.incart import INCART12Lead
+    hier_path = os.path.join('datos','StPetersburgIncart12LeadArrhythmiaDatabase','labels_hierarchy.json')
+    root = os.path.join('datos','StPetersburgIncart12LeadArrhythmiaDatabase')
+    ds = INCART12Lead(root, split='train', hierarchy_path=hier_path, eval_mode=True)
+    s = 0.0
+    for rec in ds.samples:
+        y_fine = rec[2]
+        if y_fine is not None:
+            s += float(np.sum(y_fine))
+    print(1 if s > 0 else 0)
+except Exception:
+    print(0)
+PY
+)
+      if [[ "${HAS_LABELS}" != "1" ]]; then
+        echo "[train][SKIP] incart: no hay etiquetas positivas utilizables (y_fine suma=0). Omitiendo entrenamiento supervisado para este dataset."
+        continue
+      fi
       ;;
   esac
 
@@ -109,7 +131,7 @@ PY
     --workers 16 \
     --lr 1e-3 \
     --weight_decay 5e-4 \
-    --epochs 2 \
+    --epochs 60 \
     --accum_steps 1 \
     --mixed_precision \
     --dropout 0.35 \
