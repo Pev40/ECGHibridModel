@@ -27,7 +27,7 @@ python train_full.py \
   --workers 16 \
   --lr 1e-3 \
   --weight_decay 1e-4 \
-  --epochs 30 \
+  --epochs 60 \
   --accum_steps 1 \
   --mixed_precision \
   --cache_dir datos/pt_cache \

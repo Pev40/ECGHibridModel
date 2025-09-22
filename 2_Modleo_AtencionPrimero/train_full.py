@@ -304,6 +304,8 @@ def main():
 
             scaler.scale(loss).backward()
             if step % args.accum_steps == 0:
+                scaler.unscale_(opt)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 scaler.step(opt)
                 scaler.update()
                 opt.zero_grad(set_to_none=True)
