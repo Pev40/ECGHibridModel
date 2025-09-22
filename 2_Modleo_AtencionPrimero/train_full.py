@@ -8,7 +8,14 @@ import numpy as np
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, WeightedRandomSampler
-from torch.cuda.amp import autocast, GradScaler
+try:
+    from torch.amp import autocast as _autocast_new, GradScaler  # PyTorch >=2.0
+    def autocast_cuda(enabled):
+        return _autocast_new('cuda', enabled=enabled)
+except Exception:
+    from torch.cuda.amp import autocast as _autocast_old, GradScaler  # Fallback
+    def autocast_cuda(enabled):
+        return _autocast_old(enabled=enabled)
 from tqdm import tqdm
 from sklearn.metrics import roc_auc_score, average_precision_score, f1_score
 
@@ -141,15 +148,56 @@ def evaluate(model, dl, fine_code_to_idx, coarse_groups, asl, compute_stats=True
         return mean_loss, {}
     y_true = torch.cat(all_y_fine, dim=0).numpy()
     y_prob = torch.cat(all_p_fine, dim=0).numpy()
+    c = y_true.shape[1]
+    aurocs = []
+    auprcs = []
+    f1s = []
+    for i in range(c):
+        yi = y_true[:, i]
+        pi = y_prob[:, i]
+        pos = yi.sum() > 0
+        neg = (1 - yi).sum() > 0
+        if pos and neg:
+            try:
+                aurocs.append(roc_auc_score(yi, pi))
+            except Exception:
+                aurocs.append(np.nan)
+        else:
+            aurocs.append(np.nan)
+        if pos:
+            try:
+                auprcs.append(average_precision_score(yi, pi))
+            except Exception:
+                auprcs.append(np.nan)
+        else:
+            auprcs.append(np.nan)
+        if pos:
+            yi_pred = (pi >= 0.5).astype(np.float32)
+            try:
+                f1s.append(f1_score(yi, yi_pred, zero_division=0))
+            except Exception:
+                f1s.append(np.nan)
+        else:
+            f1s.append(np.nan)
+    def nanmean_safe(arr):
+        return float(np.nanmean(arr)) if np.any(~np.isnan(arr)) else float('nan')
+    # micro
     metrics = {}
     try:
-        auroc_macro = roc_auc_score(y_true, y_prob, average='macro')
-        auprc_macro = average_precision_score(y_true, y_prob, average='macro')
-        y_pred = (y_prob >= 0.5).astype(np.float32)
-        f1_macro = f1_score(y_true, y_pred, average='macro', zero_division=0)
-        metrics.update({'auroc_macro': float(auroc_macro), 'auprc_macro': float(auprc_macro), 'f1_macro': float(f1_macro)})
+        auroc_micro = roc_auc_score(y_true, y_prob, average='micro')
     except Exception:
-        pass
+        auroc_micro = float('nan')
+    try:
+        auprc_micro = average_precision_score(y_true, y_prob, average='micro')
+    except Exception:
+        auprc_micro = float('nan')
+    metrics.update({
+        'auroc_macro': nanmean_safe(np.array(aurocs, dtype=float)),
+        'auprc_macro': nanmean_safe(np.array(auprcs, dtype=float)),
+        'f1_macro': nanmean_safe(np.array(f1s, dtype=float)),
+        'auroc_micro': float(auroc_micro),
+        'auprc_micro': float(auprc_micro),
+    })
     return mean_loss, metrics
 
 
@@ -236,7 +284,7 @@ def main():
             x = batch['samples'].to(device, non_blocking=True)
             y_coarse = batch['labels_coarse'].to(device, non_blocking=True)
             y_fine = batch['labels_fine'].to(device, non_blocking=True)
-            with autocast(enabled=args.mixed_precision and device.type=='cuda'):
+            with autocast_cuda(args.mixed_precision and device.type=='cuda'):
                 logits_coarse, logits_fine = model(x)
                 loss_coarse = asl(logits_coarse, y_coarse)
                 loss_fine = asl(logits_fine, y_fine)
