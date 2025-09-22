@@ -71,6 +71,37 @@ for ds in "${DATASETS[@]}"; do
   mkdir -p "${EXP_DIR}"
   echo "[train] Iniciando dataset=${ds} (logs en ${EXP_DIR})"
 
+  # Flags específicos por dataset
+  EXTRA_FLAGS=()
+  case "${ds}" in
+    incart)
+      # Si la jerarquía de INCART no existe o tiene 0 fine codes, copiar fallback de 12Large
+      INCART_HIER="datos/StPetersburgIncart12LeadArrhythmiaDatabase/labels_hierarchy.json"
+      if [[ ! -f "${INCART_HIER}" ]]; then
+        if [[ -f datos/12Large/labels_hierarchy.json ]]; then
+          cp -f datos/12Large/labels_hierarchy.json "${INCART_HIER}" || true
+          echo "[train] Copiada jerarquía fallback desde 12Large para INCART"
+        fi
+      else
+        fine_len=$(python - <<'PY'
+import json
+try:
+    with open('datos/StPetersburgIncart12LeadArrhythmiaDatabase/labels_hierarchy.json','r',encoding='utf-8') as f:
+        d=json.load(f)
+    print(len(d.get('fine_codes', [])))
+except Exception:
+    print(-1)
+PY
+)
+        if [[ "${fine_len}" -le 0 && -f datos/12Large/labels_hierarchy.json ]]; then
+          cp -f datos/12Large/labels_hierarchy.json "${INCART_HIER}" || true
+          echo "[train] Reemplazada jerarquía vacía por fallback de 12Large para INCART"
+        fi
+      fi
+      EXTRA_FLAGS+=(--no_sampler --no_auto_hierarchy)
+      ;;
+  esac
+
   if check_dataset_ready "${ds}" && python train_full.py \
     --dataset "${ds}" \
     --sequence_len 10000 \
@@ -94,7 +125,8 @@ for ds in "${DATASETS[@]}"; do
     --aug_amp_scale_min 0.9 \
     --aug_amp_scale_max 1.1 \
     --cache_dir datos/pt_cache \
-    --exp_dir "${EXP_DIR}"; then
+    --exp_dir "${EXP_DIR}" \
+    "${EXTRA_FLAGS[@]}"; then
       echo "[train] Dataset ${ds} completado."
   else
       echo "[train][WARN] Dataset ${ds} falló. Continuando con el siguiente..." >&2
