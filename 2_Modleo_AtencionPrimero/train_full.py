@@ -208,21 +208,40 @@ def build_loaders(dataset_name, sequence_len, hierarchy_path, batch_size, worker
     return tr_dl, va_dl, te_dl
 
 
-def evaluate(model, dl, fine_code_to_idx, coarse_groups, asl, compute_stats=True):
+def evaluate(model, dl, fine_code_to_idx, coarse_groups, base_loss_fn, compute_stats=True,
+             use_dice_on_fine=False, dice_weight=0.5, save_attn=False, attn_dir=None, attn_viz_max_batches=0):
     device = next(model.parameters()).device
     model.eval()
     loss_sum = 0.0
     count = 0
     all_y_fine = []
     all_p_fine = []
+    saved_batches = 0
     with torch.no_grad():
         for batch in dl:
             x = batch['samples'].to(device, non_blocking=True)
             y_coarse = batch['labels_coarse'].to(device, non_blocking=True)
             y_fine = batch['labels_fine'].to(device, non_blocking=True)
-            logits_coarse, logits_fine = model(x)
-            loss_coarse = asl(logits_coarse, y_coarse)
-            loss_fine = asl(logits_fine, y_fine)
+            if save_attn and saved_batches < int(attn_viz_max_batches or 0):
+                try:
+                    logits_coarse, logits_fine, attn = model.forward_with_attn(x)
+                    saved_batches += 1
+                    if attn is not None and attn_dir is not None:
+                        os.makedirs(attn_dir, exist_ok=True)
+                        attn_cpu = attn.detach().cpu().mean(dim=1).numpy()
+                        for i in range(min(attn_cpu.shape[0], 4)):
+                            np.save(os.path.join(attn_dir, f'attn_b{i}_batch{saved_batches}.npy'), attn_cpu[i])
+                except Exception:
+                    logits_coarse, logits_fine = model(x)
+            else:
+                logits_coarse, logits_fine = model(x)
+            loss_coarse = base_loss_fn(logits_coarse, y_coarse)
+            if use_dice_on_fine:
+                base_l = base_loss_fn(logits_fine, y_fine)
+                dice_l = dice_loss_multilabel(logits_fine, y_fine)
+                loss_fine = (1.0 - float(dice_weight)) * base_l + float(dice_weight) * dice_l
+            else:
+                loss_fine = base_loss_fn(logits_fine, y_fine)
             # consistencia basada en predicciones
             p_fine = torch.sigmoid(logits_fine)
             max_per_group_pred = []
@@ -279,7 +298,6 @@ def evaluate(model, dl, fine_code_to_idx, coarse_groups, asl, compute_stats=True
             f1s.append(np.nan)
     def nanmean_safe(arr):
         return float(np.nanmean(arr)) if np.any(~np.isnan(arr)) else float('nan')
-    # micro
     metrics = {}
     try:
         auroc_micro = roc_auc_score(y_true, y_prob, average='micro')
@@ -296,6 +314,15 @@ def evaluate(model, dl, fine_code_to_idx, coarse_groups, asl, compute_stats=True
         'auroc_micro': float(auroc_micro),
         'auprc_micro': float(auprc_micro),
     })
+    try:
+        prevalences = y_true.mean(axis=0)
+        order = np.argsort(prevalences)
+        topk = order[:min(10, len(order))]
+        metrics['rare_topk_indices'] = topk.tolist()
+        metrics['rare_topk_prevalences'] = prevalences[topk].tolist()
+        metrics['rare_topk_f1'] = [float(f1s[i]) for i in topk]
+    except Exception:
+        pass
     metrics['y_true'] = y_true
     metrics['y_prob'] = y_prob
     return mean_loss, metrics
