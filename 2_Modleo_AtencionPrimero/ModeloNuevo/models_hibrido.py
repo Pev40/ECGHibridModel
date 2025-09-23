@@ -56,10 +56,12 @@ class ECGHybridVariableBeforeBiTrans(nn.Module):
         self.proj_tokens = nn.Conv1d(configs.final_out_channels, self.num_leads * self.d_model, kernel_size=1, bias=False)
 
         # Atención Variable del VTT opera sobre [B, T, F, D]
-        self.var_attn = VariableAttention(dim=self.d_model, heads=self.num_heads, dim_head=self.d_model, dropout=configs.dropout)
+        attn_do = getattr(configs, 'attn_dropout', getattr(configs, 'dropout', 0.0))
+        self.var_attn = VariableAttention(dim=self.d_model, heads=self.num_heads, dim_head=self.d_model, dropout=attn_do)
 
         # Bi-Transformer temporal (igual que el ECGTransForm)
-        self.encoder_layer = nn.TransformerEncoderLayer(d_model=self.d_model, nhead=self.num_heads, batch_first=True)
+        trans_do = getattr(configs, 'trans_dropout', 0.1)
+        self.encoder_layer = nn.TransformerEncoderLayer(d_model=self.d_model, nhead=self.num_heads, batch_first=True, dropout=trans_do)
         self.transformer_encoder = nn.TransformerEncoder(self.encoder_layer, num_layers=3)
 
         # Cabezas de clasificación (coarse y fine)

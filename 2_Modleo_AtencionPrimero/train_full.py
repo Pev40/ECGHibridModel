@@ -291,6 +291,20 @@ def evaluate(model, dl, fine_code_to_idx, coarse_groups, asl, compute_stats=True
     return mean_loss, metrics
 
 
+def focal_loss_multi_label(logits, targets, alpha=0.25, gamma=2.0, reduction='mean'):
+    # logits, targets: (N, C)
+    p = torch.sigmoid(logits)
+    ce = nn.functional.binary_cross_entropy_with_logits(logits, targets, reduction='none')
+    p_t = p * targets + (1 - p) * (1 - targets)
+    alpha_t = alpha * targets + (1 - alpha) * (1 - targets)
+    loss = alpha_t * (1 - p_t) ** gamma * ce
+    if reduction == 'mean':
+        return loss.mean()
+    elif reduction == 'sum':
+        return loss.sum()
+    return loss
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--sequence_len', type=int, default=5000)
@@ -298,7 +312,7 @@ def main():
     parser.add_argument('--workers', type=int, default=8)
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--weight_decay', type=float, default=1e-4)
-    parser.add_argument('--epochs', type=int, default=20)
+    parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--accum_steps', type=int, default=1)
     parser.add_argument('--early_stopping_patience', type=int, default=10, help='Épocas sin mejora en val_loss para detener el entrenamiento. 0 para desactivar.')
     parser.add_argument('--early_stopping_min_delta', type=float, default=1e-4, help='Mejora mínima en val_loss para resetear la paciencia.')
@@ -312,9 +326,14 @@ def main():
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--deterministic', action='store_true')
     parser.add_argument('--dropout', type=float, default=0.3)
+    parser.add_argument('--attn_dropout', type=float, default=None, help='Si se especifica, dropout específico para atención variable')
+    parser.add_argument('--trans_dropout', type=float, default=0.1, help='Dropout en TransformerEncoderLayer')
     parser.add_argument('--gamma_pos', type=float, default=0.0)
     parser.add_argument('--gamma_neg', type=float, default=4.0)
     parser.add_argument('--asl_clip', type=float, default=0.05)
+    parser.add_argument('--loss_type', type=str, default='asl', choices=['asl','focal'], help='Tipo de pérdida para multilabel')
+    parser.add_argument('--focal_alpha', type=float, default=0.25)
+    parser.add_argument('--focal_gamma', type=float, default=2.0)
     parser.add_argument('--sampler_power', type=float, default=1.0)
     parser.add_argument('--no_sampler', action='store_true')
     # Augmentaciones
@@ -324,6 +343,7 @@ def main():
     parser.add_argument('--aug_amp_scale_min', type=float, default=1.0)
     parser.add_argument('--aug_amp_scale_max', type=float, default=1.0)
     parser.add_argument('--warmup_epochs', type=int, default=5)
+    parser.add_argument('--scheduler_metric', type=str, default='auroc_macro', choices=['val_loss','auroc_macro'], help='Métrica para ReduceLROnPlateau')
     parser.add_argument('--dataset', type=str, default='12large', choices=['12large','ptbxl','georgia','incart'], help='Dataset a usar')
     parser.add_argument('--no_data_check', action='store_true', help='Desactivar verificación de integridad .mat al inicio')
     parser.add_argument('--no_auto_hierarchy', action='store_true', help='Desactivar generación automática de labels_hierarchy.json si falta')
@@ -415,6 +435,8 @@ def main():
     # modelo
     configs = type('Cfg', (), dict(
         input_channels=12, sequence_len=args.sequence_len, kernel_size=8, stride=1, dropout=args.dropout,
+        attn_dropout=(args.attn_dropout if args.attn_dropout is not None else args.dropout),
+        trans_dropout=args.trans_dropout,
         mid_channels=32, final_out_channels=128, trans_dim=32, num_heads=4, num_leads=12,
         num_fine=len(fine_codes), num_coarse=len(coarse_groups)
     ))
@@ -422,8 +444,15 @@ def main():
 
     # optim / loss
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    scheduler = ReduceLROnPlateau(opt, mode='min', factor=0.5, patience=3, threshold=1e-4, cooldown=0, min_lr=1e-6)
-    asl = AsymmetricLossMultiLabel(gamma_pos=args.gamma_pos, gamma_neg=args.gamma_neg, clip=args.asl_clip)
+    # Scheduler según métrica
+    sched_mode = 'min' if args.scheduler_metric == 'val_loss' else 'max'
+    scheduler = ReduceLROnPlateau(opt, mode=sched_mode, factor=0.5, patience=3, threshold=1e-4, cooldown=0, min_lr=1e-6)
+    # Criterio
+    if args.loss_type == 'asl':
+        criterion = AsymmetricLossMultiLabel(gamma_pos=args.gamma_pos, gamma_neg=args.gamma_neg, clip=args.asl_clip)
+    else:
+        def criterion(logits, targets):
+            return focal_loss_multi_label(logits, targets, alpha=args.focal_alpha, gamma=args.focal_gamma)
     scaler = GradScaler(enabled=args.mixed_precision and device.type=='cuda')
 
     # carpeta de experimento por dataset
@@ -449,8 +478,8 @@ def main():
             y_fine = batch['labels_fine'].to(device, non_blocking=True)
             with autocast_cuda(args.mixed_precision and device.type=='cuda'):
                 logits_coarse, logits_fine = model(x)
-                loss_coarse = asl(logits_coarse, y_coarse)
-                loss_fine = asl(logits_fine, y_fine)
+                loss_coarse = criterion(logits_coarse, y_coarse)
+                loss_fine = criterion(logits_fine, y_fine)
                 # consistencia basada en predicciones
                 p_fine = torch.sigmoid(logits_fine)
                 max_per_group_pred = []
@@ -482,7 +511,7 @@ def main():
             train_n += x.size(0)
 
         # validación
-        val_loss, val_metrics = evaluate(model, va_dl, fine_code_to_idx, coarse_groups, asl, compute_stats=True)
+        val_loss, val_metrics = evaluate(model, va_dl, fine_code_to_idx, coarse_groups, criterion, compute_stats=True)
         train_mean = train_sum / max(1, train_n)
         current_lr = opt.param_groups[0]['lr']
         with open(log_path, 'a', encoding='utf-8') as f:
@@ -502,7 +531,10 @@ def main():
 
         # Actualizar el learning rate con ReduceLROnPlateau según val_loss (después del warmup)
         if epoch > args.warmup_epochs:
-            scheduler.step(val_loss)
+            if args.scheduler_metric == 'val_loss':
+                scheduler.step(val_loss)
+            else:
+                scheduler.step(val_metrics.get('auroc_macro', float('nan')))
 
         # Comprobar Early Stopping
         if args.early_stopping_patience > 0 and epochs_no_improve >= args.early_stopping_patience:
@@ -516,7 +548,7 @@ def main():
         model.load_state_dict(state['model'])
         print('Evaluando en test con mejor checkpoint...')
         # Optimización de umbrales por clase usando validación si está disponible
-        val_loss_best, val_metrics_best = evaluate(model, va_dl, fine_code_to_idx, coarse_groups, asl, compute_stats=True)
+        val_loss_best, val_metrics_best = evaluate(model, va_dl, fine_code_to_idx, coarse_groups, criterion, compute_stats=True)
         y_true_val = val_metrics_best.get('y_true', None)
         y_prob_val = val_metrics_best.get('y_prob', None)
         class_thresholds = None
@@ -545,7 +577,7 @@ def main():
                 class_thresholds = None
 
         # TTA/Multi-crop en test: promediar probabilidades de k ventanas si la señal es > sequence_len
-        test_loss, test_metrics = evaluate(model, te_dl, fine_code_to_idx, coarse_groups, asl, compute_stats=True)
+        test_loss, test_metrics = evaluate(model, te_dl, fine_code_to_idx, coarse_groups, criterion, compute_stats=True)
         print(f"Test loss: {test_loss:.4f} | AUROC_macro: {test_metrics.get('auroc_macro', float('nan')):.4f} | AUPRC_macro: {test_metrics.get('auprc_macro', float('nan')):.4f} | F1_macro: {test_metrics.get('f1_macro', float('nan')):.4f}")
         # Recalcular F1 usando umbrales por-clase si los tenemos
         if class_thresholds is not None:
