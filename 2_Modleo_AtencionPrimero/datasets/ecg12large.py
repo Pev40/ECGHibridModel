@@ -340,7 +340,7 @@ class ECG12Large(Dataset):
             if self.aug_time_warp_max > 0 and np.random.rand() < self.aug_time_warp_p:
                 L = x.shape[1]
                 wf = float(np.random.uniform(max(0.5, 1.0 - self.aug_time_warp_max), 1.0 + self.aug_time_warp_max))
-                xw = F.interpolate(x.unsqueeze(0), scale_factor=(1.0, wf), mode='bilinear', align_corners=False).squeeze(0)
+                xw = F.interpolate(x.unsqueeze(0), scale_factor=wf, mode='linear', align_corners=False).squeeze(0)
                 if xw.shape[1] >= L:
                     x = xw[:, :L]
                 else:
