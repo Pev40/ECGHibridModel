@@ -141,11 +141,25 @@ PY
     --gamma_neg 4.0 \
     --asl_clip 0.0 \
     --sampler_power 0.3 \
+    --sampler_power_rare 1.5 \
+    --rare_class_thresh 0.01 \
     --aug_jitter_std 0.01 \
     --aug_shift_max 50 \
     --aug_lead_drop_prob 0.05 \
     --aug_amp_scale_min 0.9 \
     --aug_amp_scale_max 1.1 \
+    --aug_lead_noise_scale_max 2.0 \
+    --aug_time_warp_max 0.05 \
+    --aug_time_warp_p 0.5 \
+    --use_dice_on_fine \
+    --dice_weight 0.5 \
+    --mixup_alpha 0.2 \
+    --mixup_p 0.5 \
+    --scheduler_metric auroc_macro \
+    --cosine_after_plateau \
+    --cosine_t0 10 \
+    --cosine_tmult 1 \
+    --cosine_eta_min_scale 0.01 \
     --cache_dir datos/pt_cache \
     --exp_dir "${EXP_DIR}" \
     "${EXTRA_FLAGS[@]}"; then
