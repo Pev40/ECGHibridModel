@@ -3,11 +3,10 @@ import json
 import math
 import argparse
 from glob import glob
-
 import numpy as np
 import torch
 from torch import nn
-from torch.utils.data import DataLoader, WeightedRandomSampler
+from torch.utils.data import DataLoader, WeightedRandomSampler, Subset
 try:
     from torch.amp import autocast as _autocast_new, GradScaler  # PyTorch >=2.0
     def autocast_cuda(enabled):
@@ -19,7 +18,7 @@ except Exception:
 from tqdm import tqdm
 from sklearn.metrics import roc_auc_score, average_precision_score, f1_score
 from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingWarmRestarts
-
+from sklearn.model_selection import StratifiedKFold
 from ModeloNuevo import ECGHybridVariableBeforeBiTrans
 from datasets.ecg12large import ECG12Large, extract_patient_id
 from datasets import PTBXL, INCART12Lead
@@ -84,6 +83,33 @@ def build_patient_splits(root, seed=42, train_frac=0.7, val_frac=0.15):
     return tr_files, va_files, te_files
 
 
+def mixup_collate_fn(batch, alpha=0.2):
+    if alpha == 0 or len(batch) < 2:
+        # Stack normal si no mixup o batch pequeño
+        samples = torch.stack([b['samples'] for b in batch])
+        labels_coarse = torch.stack([b['labels_coarse'] for b in batch])
+        labels_fine = torch.stack([b['labels_fine'] for b in batch])
+        return {'samples': samples, 'labels_coarse': labels_coarse, 'labels_fine': labels_fine}
+    
+    # Mixup: permuta y mezcla
+    samples = torch.stack([b['samples'] for b in batch])
+    labels_coarse = torch.stack([b['labels_coarse'] for b in batch])
+    labels_fine = torch.stack([b['labels_fine'] for b in batch])
+    
+    idx = torch.randperm(len(samples))
+    lam = np.random.beta(alpha, alpha)
+    
+    samples_mix = lam * samples + (1 - lam) * samples[idx]
+    labels_coarse_mix = lam * labels_coarse + (1 - lam) * labels_coarse[idx]
+    labels_fine_mix = lam * labels_fine + (1 - lam) * labels_fine[idx]
+    
+    return {
+        'samples': samples_mix,
+        'labels_coarse': labels_coarse_mix,
+        'labels_fine': labels_fine_mix
+    }
+
+
 def build_loaders(dataset_name, sequence_len, hierarchy_path, batch_size, workers, cache_dir=None,
                  target_fs=500.0, bandpass_hz=(0.5, 45.0), notch_hz=None, seed=42,
                  use_sampler=True, sampler_power=1.0,
@@ -91,7 +117,7 @@ def build_loaders(dataset_name, sequence_len, hierarchy_path, batch_size, worker
                  aug_jitter_std=0.0, aug_shift_max=0, aug_lead_drop_prob=0.0,
                  aug_amp_scale_min=1.0, aug_amp_scale_max=1.0,
                  aug_lead_noise_scale_max=1.0, aug_time_warp_max=0.0, aug_time_warp_p=0.0,
-                 smoke_test=False, smoke_n=256):
+                 smoke_test=False, smoke_n=256, mixup_alpha=0.0):
     dataset_name = str(dataset_name).lower()
     if dataset_name in ('12large', 'ecg12large', 'wfdbrecords'):
         root = os.path.join('datos', '12Large', 'WFDBRecords')
@@ -198,9 +224,10 @@ def build_loaders(dataset_name, sequence_len, hierarchy_path, batch_size, worker
                 sample_w = sample_w / (sample_w.mean() + 1e-8)
                 sampler = WeightedRandomSampler(weights=torch.from_numpy(sample_w).float(), num_samples=len(tr_ds), replacement=True)
                 shuffle_train = False
-
+    collate_fn_tr = mixup_collate_fn if mixup_alpha > 0 else None
     tr_dl = DataLoader(tr_ds, batch_size=batch_size, shuffle=shuffle_train, sampler=sampler, num_workers=workers,
-                       pin_memory=pin, persistent_workers=(workers>0), prefetch_factor=2 if workers>0 else None)
+                       pin_memory=pin, persistent_workers=(workers>0), prefetch_factor=2 if workers>0 else None,
+                       **({'collate_fn': collate_fn_tr} if collate_fn_tr else {}))
     va_dl = DataLoader(va_ds, batch_size=batch_size, shuffle=False, num_workers=workers,
                        pin_memory=pin, persistent_workers=(workers>0), prefetch_factor=2 if workers>0 else None)
     te_dl = DataLoader(te_ds, batch_size=batch_size, shuffle=False, num_workers=workers,
@@ -354,6 +381,84 @@ def dice_loss_multilabel(logits, targets, eps=1e-7, reduction='mean'):
         return loss.sum()
     return loss
 
+
+def get_kfold_loaders(dataset_name, sequence_len, hierarchy_path, batch_size, workers, cache_dir=None,
+                      target_fs=500.0, bandpass_hz=(0.5, 45.0), notch_hz=None, seed=42,
+                      use_sampler=True, sampler_power=1.0, sampler_power_rare=1.0, rare_class_thresh=0.01,
+                      aug_jitter_std=0.0, aug_shift_max=0, aug_lead_drop_prob=0.0,
+                      aug_amp_scale_min=1.0, aug_amp_scale_max=1.0, aug_lead_noise_scale_max=0.0, aug_time_warp_max=0.0, aug_time_warp_p=0.0,
+                      smoke_test=False, smoke_n=256, n_folds=1, kfold_seed=42, mixup_alpha=0.0):
+    if n_folds == 1:
+        return [build_loaders(dataset_name, sequence_len, hierarchy_path, batch_size, workers, cache_dir,
+                              target_fs, bandpass_hz, notch_hz, seed, use_sampler, sampler_power, sampler_power_rare, rare_class_thresh,
+                              aug_jitter_std, aug_shift_max, aug_lead_drop_prob, aug_amp_scale_min, aug_amp_scale_max, aug_lead_noise_scale_max, aug_time_warp_max, aug_time_warp_p,
+                              smoke_test, smoke_n, mixup_alpha)]
+    
+    # Carga full_ds
+    if dataset_name in ('12large', 'georgia'):
+        root = os.path.join('datos', '12Large' if '12large' in dataset_name else 'Georgia12LeadECGDatabase', 'WFDBRecords' if '12large' in dataset_name else '')
+        all_files = glob(os.path.join(root, '**', '*.hea'), recursive=True)
+        full_ds = ECG12Large(root, sequence_len=sequence_len, files=all_files[:smoke_n * n_folds] if smoke_test else all_files,
+                             multilabel=True, hierarchy_path=hierarchy_path, cache_dir=cache_dir,
+                             random_crop=not smoke_test, target_fs=target_fs, bandpass_hz=bandpass_hz, notch_hz=notch_hz, eval_mode=False,
+                             aug_jitter_std=aug_jitter_std, aug_shift_max=aug_shift_max, aug_lead_drop_prob=aug_lead_drop_prob,
+                             aug_amp_scale_min=aug_amp_scale_min, aug_amp_scale_max=aug_amp_scale_max, aug_lead_noise_scale_max=aug_lead_noise_scale_max, aug_time_warp_max=aug_time_warp_max, aug_time_warp_p=aug_time_warp_p)
+        y_strat = np.array([s[2][:, 0].item() if s[2].sum() > 0 else 0 for s in full_ds.samples])  # Primer coarse
+    elif dataset_name == 'ptbxl':
+        root = os.path.join('datos', 'PTBXL')
+        # Custom full load: combina train/val/test samples
+        full_samples = PTBXL(root, split='train').samples + PTBXL(root, split='val').samples + PTBXL(root, split='test').samples
+        full_ds = PTBXL(root, sequence_len=sequence_len, hierarchy_path=hierarchy_path, cache_dir=cache_dir,
+                        target_fs=target_fs, bandpass_hz=bandpass_hz, notch_hz=notch_hz, random_crop=True, eval_mode=False,
+                        aug_jitter_std=aug_jitter_std )  # Set samples=full_samples
+        y_strat = full_ds.labels_coarse[:, 0].numpy() if hasattr(full_ds, 'labels_coarse') else np.zeros(len(full_ds))
+    elif dataset_name == 'incart':
+        root = os.path.join('datos', 'StPetersburgIncart12LeadArrhythmiaDatabase')
+        # INCART no soporta 'all'; combinamos splits manualmente
+        tr_all = INCART12Lead(root, split='train', sequence_len=sequence_len, hierarchy_path=hierarchy_path, cache_dir=cache_dir,
+                               target_fs=257.0, bandpass_hz=bandpass_hz, notch_hz=notch_hz, random_crop=True, eval_mode=False,
+                               aug_jitter_std=aug_jitter_std)
+        va_all = INCART12Lead(root, split='val', sequence_len=sequence_len, hierarchy_path=hierarchy_path, cache_dir=cache_dir,
+                               target_fs=257.0, bandpass_hz=bandpass_hz, notch_hz=notch_hz, random_crop=True, eval_mode=False,
+                               aug_jitter_std=aug_jitter_std)
+        te_all = INCART12Lead(root, split='test', sequence_len=sequence_len, hierarchy_path=hierarchy_path, cache_dir=cache_dir,
+                               target_fs=257.0, bandpass_hz=bandpass_hz, notch_hz=notch_hz, random_crop=True, eval_mode=False,
+                               aug_jitter_std=aug_jitter_std)
+        from torch.utils.data import ConcatDataset
+        full_ds = ConcatDataset([tr_all, va_all, te_all])
+        y_strat = full_ds.labels_coarse[:, 0].numpy() if hasattr(full_ds, 'labels_coarse') else np.zeros(len(full_ds))
+    else:
+        raise ValueError(f"Dataset no soportado para k-fold: {dataset_name}")
+
+    skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=kfold_seed)
+    indices = list(range(len(full_ds)))
+    folds = list(skf.split(indices, y_strat))
+
+    fold_loaders = []
+    for fold_i, (train_idx, val_idx) in enumerate(folds):
+        tr_ds_fold = Subset(full_ds, train_idx)
+        va_ds_fold = Subset(full_ds, val_idx)
+        # Test: Rota 20% de train como test
+        test_size = len(train_idx) // 5
+        test_idx = train_idx[:test_size]
+        te_ds_fold = Subset(full_ds, test_idx)
+
+        # DLs con params compartidos
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        pin = device.type == 'cuda'
+        collate_fn_tr = mixup_collate_fn if mixup_alpha > 0 else None
+        tr_dl_fold = DataLoader(tr_ds_fold, batch_size=batch_size, shuffle=True, num_workers=workers,
+                                pin_memory=pin, persistent_workers=(workers>0), prefetch_factor=2 if workers>0 else None,
+                                **({'collate_fn': collate_fn_tr} if collate_fn_tr else {}))
+        va_dl_fold = DataLoader(va_ds_fold, batch_size=batch_size, shuffle=False, num_workers=workers,
+                                pin_memory=pin, persistent_workers=(workers>0), prefetch_factor=2 if workers>0 else None)
+        te_dl_fold = DataLoader(te_ds_fold, batch_size=batch_size, shuffle=False, num_workers=workers,
+                                pin_memory=pin, persistent_workers=(workers>0), prefetch_factor=2 if workers>0 else None)
+        fold_loaders.append((tr_dl_fold, va_dl_fold, te_dl_fold))
+
+    return fold_loaders
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--sequence_len', type=int, default=5000)
@@ -413,7 +518,13 @@ def main():
     parser.add_argument('--dice_weight', type=float, default=0.5, help='Peso de Dice en la combinación híbrida')
     parser.add_argument('--save_attn_viz', action='store_true', help='Guardar mapas de atención durante validación')
     parser.add_argument('--attn_viz_max_batches', type=int, default=2)
+    parser.add_argument('--n_folds', type=int, default=1, help='Número de folds para k-fold estratificado (1=single split)')
+    parser.add_argument('--kfold_seed', type=int, default=42, help='Seed para k-fold')
     args = parser.parse_args()
+
+
+
+
 
     set_seed(args.seed, deterministic=args.deterministic)
 
@@ -477,7 +588,199 @@ def main():
     coarse_groups = hier['coarse_groups']
     fine_code_to_idx = {c:i for i,c in enumerate(fine_codes)}
 
-    # loaders
+    # K-FOLD branch
+    if args.n_folds > 1:
+        fold_loaders = get_kfold_loaders(
+            args.dataset, args.sequence_len, hierarchy_path, args.batch_size, args.workers,
+            cache_dir=args.cache_dir,
+            target_fs=args.target_fs,
+            bandpass_hz=(args.bandpass_low, args.bandpass_high),
+            notch_hz=(args.notch_hz if args.notch_hz in (50,60) else None),
+            seed=args.seed,
+            use_sampler=(not args.no_sampler),
+            sampler_power=args.sampler_power,
+            sampler_power_rare=args.sampler_power_rare,
+            rare_class_thresh=args.rare_class_thresh,
+            aug_jitter_std=args.aug_jitter_std,
+            aug_shift_max=args.aug_shift_max,
+            aug_lead_drop_prob=args.aug_lead_drop_prob,
+            aug_amp_scale_min=args.aug_amp_scale_min,
+            aug_amp_scale_max=args.aug_amp_scale_max,
+            aug_lead_noise_scale_max=args.aug_lead_noise_scale_max,
+            aug_time_warp_max=args.aug_time_warp_max,
+            aug_time_warp_p=args.aug_time_warp_p,
+            smoke_test=args.smoke_test,
+            smoke_n=args.smoke_n,
+            n_folds=args.n_folds,
+            kfold_seed=args.kfold_seed,
+            mixup_alpha=args.mixup_alpha
+        )
+
+        exp_root = os.path.join(args.exp_dir, args.dataset)
+        os.makedirs(exp_root, exist_ok=True)
+        all_test_metrics = []
+
+        for fold_i, (tr_dl, va_dl, te_dl) in enumerate(fold_loaders):
+            print(f"\n=== Fold {fold_i+1}/{args.n_folds} ===")
+
+            # modelo por fold
+            configs = type('Cfg', (), dict(
+                input_channels=12, sequence_len=args.sequence_len, kernel_size=8, stride=1, dropout=args.dropout,
+                attn_dropout=(args.attn_dropout if args.attn_dropout is not None else args.dropout),
+                trans_dropout=args.trans_dropout,
+                mid_channels=32, final_out_channels=128, trans_dim=32, num_heads=4, num_leads=12,
+                num_fine=len(fine_codes), num_coarse=len(coarse_groups)
+            ))
+            model = ECGHybridVariableBeforeBiTrans(configs, {"feature_dim": 128}).to(device)
+
+            # optim / schedulers por fold
+            opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+            sched_mode = 'min' if args.scheduler_metric == 'val_loss' else 'max'
+            scheduler = ReduceLROnPlateau(opt, mode=sched_mode, factor=0.5, patience=5, threshold=1e-4, cooldown=0, min_lr=1e-6)
+            cosine_sched = CosineAnnealingWarmRestarts(opt, T_0=max(1, args.cosine_t0), T_mult=max(1, args.cosine_tmult), eta_min=args.lr * float(max(0.0, args.cosine_eta_min_scale))) if args.cosine_after_plateau else None
+
+            # criterio
+            if args.loss_type == 'asl':
+                base_loss_fn = AsymmetricLossMultiLabel(gamma_pos=args.gamma_pos, gamma_neg=args.gamma_neg, clip=args.asl_clip)
+            else:
+                def base_loss_fn(logits, targets):
+                    return focal_loss_multi_label(logits, targets, alpha=args.focal_alpha, gamma=args.focal_gamma)
+            scaler = GradScaler(enabled=args.mixed_precision and device.type=='cuda')
+
+            # logs por fold
+            fold_dir = os.path.join(exp_root, f'fold_{fold_i}')
+            os.makedirs(fold_dir, exist_ok=True)
+            fold_log_path = os.path.join(fold_dir, 'train_log.csv')
+            with open(fold_log_path, 'w', encoding='utf-8') as f:
+                f.write('epoch,train_loss,val_loss,val_auroc_macro,val_auprc_macro,val_f1_macro,lr\n')
+
+            best_val = math.inf
+            epochs_no_improve = 0
+            max_epochs = min(args.epochs, 2) if args.smoke_test else args.epochs
+            for epoch in range(1, max_epochs+1):
+                model.train()
+                pbar = tqdm(tr_dl, desc=f'Fold {fold_i+1} - Epoch {epoch}/{args.epochs}')
+                opt.zero_grad(set_to_none=True)
+                train_sum = 0.0
+                train_n = 0
+                for step, batch in enumerate(pbar, start=1):
+                    x = batch['samples'].to(device, non_blocking=True)
+                    y_coarse = batch['labels_coarse'].to(device, non_blocking=True)
+                    y_fine = batch['labels_fine'].to(device, non_blocking=True)
+
+                    # Mixup del loop desactivado si collate mixup activo
+                    use_collate_mixup = getattr(args, 'mixup_alpha', 0.0) > 0.0
+                    if use_collate_mixup:
+                        y_coarse_mix = y_coarse
+                        y_fine_mix = y_fine
+                    else:
+                        use_mixup = (getattr(args, 'mixup_alpha', 0.0) > 0.0 and np.random.rand() < getattr(args, 'mixup_p', 0.0))
+                        if use_mixup:
+                            lam = np.random.beta(args.mixup_alpha, args.mixup_alpha)
+                            perm = torch.randperm(x.size(0), device=x.device)
+                            x = lam * x + (1.0 - lam) * x[perm]
+                            y_coarse_mix = lam * y_coarse + (1.0 - lam) * y_coarse[perm]
+                            y_fine_mix = lam * y_fine + (1.0 - lam) * y_fine[perm]
+                        else:
+                            y_coarse_mix = y_coarse
+                            y_fine_mix = y_fine
+
+                    with autocast_cuda(args.mixed_precision and device.type=='cuda'):
+                        logits_coarse, logits_fine = model(x)
+                        loss_coarse = base_loss_fn(logits_coarse, y_coarse_mix)
+                        if getattr(args, 'use_dice_on_fine', False):
+                            base_l = base_loss_fn(logits_fine, y_fine_mix)
+                            dice_l = dice_loss_multilabel(logits_fine, y_fine_mix)
+                            loss_fine = (1.0 - float(getattr(args, 'dice_weight', 0.5))) * base_l + float(getattr(args, 'dice_weight', 0.5)) * dice_l
+                        else:
+                            loss_fine = base_loss_fn(logits_fine, y_fine_mix)
+                        # consistencia
+                        p_fine = torch.sigmoid(logits_fine)
+                        max_per_group_pred = []
+                        for g, codes in coarse_groups.items():
+                            idxs = [fine_code_to_idx.get(c, None) for c in codes]
+                            idxs = [i for i in idxs if i is not None]
+                            if len(idxs) == 0:
+                                max_per_group_pred.append(torch.zeros(y_fine.shape[0], device=device))
+                            else:
+                                max_per_group_pred.append(p_fine[:, idxs].max(dim=1).values)
+                        max_per_group_pred = torch.stack(max_per_group_pred, dim=1)
+                        cons = nn.functional.binary_cross_entropy_with_logits(logits_coarse, max_per_group_pred.detach())
+                        loss = 0.5*loss_coarse + 1.0*loss_fine + 0.5*cons
+
+                    scaler.scale(loss).backward()
+                    if step % args.accum_steps == 0:
+                        scaler.unscale_(opt)
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                        if epoch <= args.warmup_epochs:
+                            for pg in opt.param_groups:
+                                base_lr = args.lr
+                                pg['lr'] = base_lr * float(epoch) / float(max(1, args.warmup_epochs))
+                        scaler.step(opt)
+                        scaler.update()
+                        opt.zero_grad(set_to_none=True)
+                    pbar.set_postfix({'loss': f'{loss.item():.3f}'})
+                    train_sum += loss.item() * x.size(0)
+                    train_n += x.size(0)
+
+                # validación
+                attn_dir = None
+                if getattr(args, 'save_attn_viz', False):
+                    attn_dir = os.path.join(fold_dir, 'attn_maps')
+                val_loss, val_metrics = evaluate(
+                    model, va_dl, fine_code_to_idx, coarse_groups, base_loss_fn, compute_stats=True,
+                    use_dice_on_fine=getattr(args, 'use_dice_on_fine', False), dice_weight=getattr(args, 'dice_weight', 0.5),
+                    save_attn=getattr(args, 'save_attn_viz', False), attn_dir=attn_dir, attn_viz_max_batches=getattr(args, 'attn_viz_max_batches', 0)
+                )
+                train_mean = train_sum / max(1, train_n)
+                current_lr = opt.param_groups[0]['lr']
+                with open(fold_log_path, 'a', encoding='utf-8') as f:
+                    f.write(f"{epoch},{train_mean:.6f},{val_loss:.6f},{val_metrics.get('auroc_macro', float('nan')):.6f},{val_metrics.get('auprc_macro', float('nan')):.6f},{val_metrics.get('f1_macro', float('nan')):.6f},{current_lr:.8f}\n")
+                if val_loss < best_val - args.early_stopping_min_delta:
+                    best_val = val_loss
+                    epochs_no_improve = 0
+                    torch.save({'model': model.state_dict(), 'opt': opt.state_dict(), 'epoch': epoch}, os.path.join(fold_dir, 'ckpt_best.pt'))
+                else:
+                    epochs_no_improve += 1
+                print(f"Fold {fold_i+1} Epoch {epoch} done. Train: {train_mean:.4f} | Val: {val_loss:.4f} (best {best_val:.4f}) | AUROC_macro: {val_metrics.get('auroc_macro', float('nan')):.4f}")
+
+                if epoch > args.warmup_epochs:
+                    if args.scheduler_metric == 'val_loss':
+                        scheduler.step(val_loss)
+                    else:
+                        scheduler.step(val_metrics.get('auroc_macro', float('nan')))
+                    if cosine_sched is not None:
+                        cosine_sched.step(epoch)
+
+                if args.early_stopping_patience > 0 and epochs_no_improve >= args.early_stopping_patience:
+                    print(f"[Fold {fold_i+1}] Early stopping tras {args.early_stopping_patience} épocas sin mejora")
+                    break
+
+            # Test del fold con mejor ckpt
+            best_ckpt = os.path.join(fold_dir, 'ckpt_best.pt')
+            if os.path.exists(best_ckpt):
+                state = torch.load(best_ckpt, map_location=device)
+                model.load_state_dict(state['model'])
+            test_loss, test_metrics = evaluate(
+                model, te_dl, fine_code_to_idx, coarse_groups, base_loss_fn, compute_stats=True,
+                use_dice_on_fine=getattr(args, 'use_dice_on_fine', False), dice_weight=getattr(args, 'dice_weight', 0.5)
+            )
+            print(f"Fold {fold_i+1} Test: AUROC_macro {test_metrics.get('auroc_macro', float('nan')):.4f} | AUPRC_macro {test_metrics.get('auprc_macro', float('nan')):.4f} | F1_macro {test_metrics.get('f1_macro', float('nan')):.4f}")
+            all_test_metrics.append(test_metrics)
+
+        # Promedio K-Fold
+        keys = ['auroc_macro', 'auprc_macro', 'f1_macro', 'auroc_micro', 'auprc_micro']
+        mean_metrics = {k: float(np.nanmean([m.get(k, np.nan) for m in all_test_metrics])) for k in keys}
+        std_metrics = {k: float(np.nanstd([m.get(k, np.nan) for m in all_test_metrics])) for k in keys}
+        print("\n=== K-Fold Average ===")
+        for k in keys:
+            print(f"{k}: {mean_metrics[k]:.4f} ± {std_metrics[k]:.4f}")
+        with open(os.path.join(exp_root, 'kfold_test_metrics.json'), 'w', encoding='utf-8') as f:
+            json.dump({'mean': mean_metrics, 'std': std_metrics}, f, ensure_ascii=False, indent=2)
+        print('Entrenamiento completo.')
+        return
+
+    # loaders (single split)
     tr_dl, va_dl, te_dl = build_loaders(
         args.dataset, args.sequence_len, hierarchy_path, args.batch_size, args.workers,
         cache_dir=args.cache_dir,
@@ -498,7 +801,8 @@ def main():
         aug_time_warp_max=args.aug_time_warp_max,
         aug_time_warp_p=args.aug_time_warp_p,
         smoke_test=args.smoke_test,
-        smoke_n=args.smoke_n
+        smoke_n=args.smoke_n,
+        mixup_alpha=args.mixup_alpha
     )
 
     # modelo
@@ -553,17 +857,22 @@ def main():
             x = batch['samples'].to(device, non_blocking=True)
             y_coarse = batch['labels_coarse'].to(device, non_blocking=True)
             y_fine = batch['labels_fine'].to(device, non_blocking=True)
-            # Mixup temporal por batch (opcional)
-            use_mixup = (getattr(args, 'mixup_alpha', 0.0) > 0.0 and np.random.rand() < getattr(args, 'mixup_p', 0.0))
-            if use_mixup:
-                lam = np.random.beta(args.mixup_alpha, args.mixup_alpha)
-                perm = torch.randperm(x.size(0), device=x.device)
-                x = lam * x + (1.0 - lam) * x[perm]
-                y_coarse_mix = lam * y_coarse + (1.0 - lam) * y_coarse[perm]
-                y_fine_mix = lam * y_fine + (1.0 - lam) * y_fine[perm]
-            else:
+            # Mixup en loop sólo si NO se usa collate mixup
+            use_collate_mixup = getattr(args, 'mixup_alpha', 0.0) > 0.0
+            if use_collate_mixup:
                 y_coarse_mix = y_coarse
                 y_fine_mix = y_fine
+            else:
+                use_mixup = (getattr(args, 'mixup_alpha', 0.0) > 0.0 and np.random.rand() < getattr(args, 'mixup_p', 0.0))
+                if use_mixup:
+                    lam = np.random.beta(args.mixup_alpha, args.mixup_alpha)
+                    perm = torch.randperm(x.size(0), device=x.device)
+                    x = lam * x + (1.0 - lam) * x[perm]
+                    y_coarse_mix = lam * y_coarse + (1.0 - lam) * y_coarse[perm]
+                    y_fine_mix = lam * y_fine + (1.0 - lam) * y_fine[perm]
+                else:
+                    y_coarse_mix = y_coarse
+                    y_fine_mix = y_fine
             with autocast_cuda(args.mixed_precision and device.type=='cuda'):
                 logits_coarse, logits_fine = model(x)
                 loss_coarse = base_loss_fn(logits_coarse, y_coarse_mix)

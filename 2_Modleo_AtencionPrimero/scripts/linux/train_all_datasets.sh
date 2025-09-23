@@ -154,7 +154,9 @@ PY
     --use_dice_on_fine \
     --dice_weight 0.5 \
     --mixup_alpha 0.2 \
-    --mixup_p 0.5 \
+    --mixup_p 0 \
+    --n_folds 1 \
+    --kfold_seed 42 \
     --scheduler_metric auroc_macro \
     --cosine_after_plateau \
     --cosine_t0 10 \

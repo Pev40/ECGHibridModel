@@ -331,7 +331,7 @@ def plot_combined_micro_pr(run_dirs, out_path):
 
 def main():
     parser = argparse.ArgumentParser(description='Evaluación y gráficas a partir de resultados guardados')
-    parser.add_argument('--root', type=str, default=os.path.join('Resultado',"DespuesTuning","all_datasets_20250923_135105"), help='Carpeta raíz con subcarpetas por dataset')
+    parser.add_argument('--root', type=str, default=os.path.join('Resultado',"DespuesTuning","all_datasets_20250923_154225"), help='Carpeta raíz con subcarpetas por dataset')
     parser.add_argument('--save', action='store_true', help='Guardar figuras en disco')
     args = parser.parse_args()
 
