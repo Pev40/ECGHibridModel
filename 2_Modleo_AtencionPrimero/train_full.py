@@ -633,7 +633,6 @@ def main():
         class_thresholds = None
         if y_true_val is not None and y_prob_val is not None:
             try:
-                import numpy as np
                 from sklearn.metrics import f1_score
                 c = y_true_val.shape[1]
                 class_thresholds = np.zeros(c, dtype=np.float32)
