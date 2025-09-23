@@ -18,7 +18,7 @@ except Exception:
         return _autocast_old(enabled=enabled)
 from tqdm import tqdm
 from sklearn.metrics import roc_auc_score, average_precision_score, f1_score
-from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingWarmRestarts
 
 from ModeloNuevo import ECGHybridVariableBeforeBiTrans
 from datasets.ecg12large import ECG12Large, extract_patient_id
@@ -87,8 +87,10 @@ def build_patient_splits(root, seed=42, train_frac=0.7, val_frac=0.15):
 def build_loaders(dataset_name, sequence_len, hierarchy_path, batch_size, workers, cache_dir=None,
                  target_fs=500.0, bandpass_hz=(0.5, 45.0), notch_hz=None, seed=42,
                  use_sampler=True, sampler_power=1.0,
+                 sampler_power_rare=1.0, rare_class_thresh=0.01,
                  aug_jitter_std=0.0, aug_shift_max=0, aug_lead_drop_prob=0.0,
                  aug_amp_scale_min=1.0, aug_amp_scale_max=1.0,
+                 aug_lead_noise_scale_max=1.0, aug_time_warp_max=0.0, aug_time_warp_p=0.0,
                  smoke_test=False, smoke_n=256):
     dataset_name = str(dataset_name).lower()
     if dataset_name in ('12large', 'ecg12large', 'wfdbrecords'):
@@ -99,7 +101,8 @@ def build_loaders(dataset_name, sequence_len, hierarchy_path, batch_size, worker
                               random_crop=True, target_fs=target_fs, bandpass_hz=bandpass_hz, notch_hz=notch_hz, eval_mode=False,
                               aug_jitter_std=aug_jitter_std, aug_shift_max=aug_shift_max,
                               aug_lead_drop_prob=aug_lead_drop_prob, aug_amp_scale_min=aug_amp_scale_min,
-                              aug_amp_scale_max=aug_amp_scale_max)
+                              aug_amp_scale_max=aug_amp_scale_max,
+                              aug_lead_noise_scale_max=aug_lead_noise_scale_max, aug_time_warp_max=aug_time_warp_max, aug_time_warp_p=aug_time_warp_p)
         va_ds = ECG12Large(root, sequence_len=sequence_len, files=va_files[:max(1, smoke_n//4)] if smoke_test else va_files,
                               multilabel=True, hierarchy_path=hierarchy_path, cache_dir=cache_dir,
                               random_crop=False, target_fs=target_fs, bandpass_hz=bandpass_hz, notch_hz=notch_hz, eval_mode=True)
@@ -111,7 +114,8 @@ def build_loaders(dataset_name, sequence_len, hierarchy_path, batch_size, worker
         tr_ds = PTBXL(root, split='train', sequence_len=sequence_len, hierarchy_path=hierarchy_path, cache_dir=cache_dir,
                       target_fs=target_fs, bandpass_hz=bandpass_hz, notch_hz=notch_hz, random_crop=True, eval_mode=False,
                       aug_jitter_std=aug_jitter_std, aug_shift_max=aug_shift_max, aug_lead_drop_prob=aug_lead_drop_prob,
-                      aug_amp_scale_min=aug_amp_scale_min, aug_amp_scale_max=aug_amp_scale_max)
+                      aug_amp_scale_min=aug_amp_scale_min, aug_amp_scale_max=aug_amp_scale_max,
+                      aug_lead_noise_scale_max=aug_lead_noise_scale_max, aug_time_warp_max=aug_time_warp_max, aug_time_warp_p=aug_time_warp_p)
         if smoke_test and hasattr(tr_ds, 'samples'):
             tr_ds.samples = tr_ds.samples[:smoke_n]
         va_ds = PTBXL(root, split='val', sequence_len=sequence_len, hierarchy_path=hierarchy_path, cache_dir=cache_dir,
@@ -127,7 +131,8 @@ def build_loaders(dataset_name, sequence_len, hierarchy_path, batch_size, worker
         tr_ds = INCART12Lead(root, split='train', sequence_len=sequence_len, hierarchy_path=hierarchy_path, cache_dir=cache_dir,
                              target_fs=257.0, bandpass_hz=bandpass_hz, notch_hz=notch_hz, random_crop=True, eval_mode=False,
                              aug_jitter_std=aug_jitter_std, aug_shift_max=aug_shift_max, aug_lead_drop_prob=aug_lead_drop_prob,
-                             aug_amp_scale_min=aug_amp_scale_min, aug_amp_scale_max=aug_amp_scale_max)
+                             aug_amp_scale_min=aug_amp_scale_min, aug_amp_scale_max=aug_amp_scale_max,
+                             aug_lead_noise_scale_max=aug_lead_noise_scale_max, aug_time_warp_max=aug_time_warp_max, aug_time_warp_p=aug_time_warp_p)
         if smoke_test and hasattr(tr_ds, 'samples'):
             tr_ds.samples = tr_ds.samples[:smoke_n]
         va_ds = INCART12Lead(root, split='val', sequence_len=sequence_len, hierarchy_path=hierarchy_path, cache_dir=cache_dir,
@@ -177,7 +182,12 @@ def build_loaders(dataset_name, sequence_len, hierarchy_path, batch_size, worker
             shuffle_train = True
         else:
             class_freq = y_mat.mean(axis=0) + 1e-6
-            inv_freq = (1.0 / class_freq) ** float(max(0.0, sampler_power))
+            # Potenciar clases raras con mayor exponente
+            base_power = float(max(0.0, sampler_power))
+            extra_power = float(max(1.0, sampler_power_rare))
+            is_rare = (class_freq < float(max(1e-6, rare_class_thresh)))
+            per_class_power = np.where(is_rare, base_power * extra_power, base_power)
+            inv_freq = (1.0 / class_freq) ** per_class_power
             inv_freq = inv_freq / max(1e-12, inv_freq.sum())
             sample_w = (y_mat * inv_freq).sum(axis=1)
             # Validar pesos
@@ -305,6 +315,18 @@ def focal_loss_multi_label(logits, targets, alpha=0.25, gamma=2.0, reduction='me
     return loss
 
 
+def dice_loss_multilabel(logits, targets, eps=1e-7, reduction='mean'):
+    probs = torch.sigmoid(logits)
+    intersection = (probs * targets).sum(dim=0)
+    cardinality = probs.sum(dim=0) + targets.sum(dim=0)
+    dice = (2.0 * intersection + eps) / (cardinality + eps)
+    loss = 1.0 - dice
+    if reduction == 'mean':
+        return loss.mean()
+    elif reduction == 'sum':
+        return loss.sum()
+    return loss
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--sequence_len', type=int, default=5000)
@@ -335,6 +357,8 @@ def main():
     parser.add_argument('--focal_alpha', type=float, default=0.25)
     parser.add_argument('--focal_gamma', type=float, default=2.0)
     parser.add_argument('--sampler_power', type=float, default=1.0)
+    parser.add_argument('--sampler_power_rare', type=float, default=1.0, help='Potencia extra para clases raras (<1%)')
+    parser.add_argument('--rare_class_thresh', type=float, default=0.01, help='Umbral de rareza por frecuencia')
     parser.add_argument('--no_sampler', action='store_true')
     # Augmentaciones
     parser.add_argument('--aug_jitter_std', type=float, default=0.0)
@@ -342,13 +366,26 @@ def main():
     parser.add_argument('--aug_lead_drop_prob', type=float, default=0.0)
     parser.add_argument('--aug_amp_scale_min', type=float, default=1.0)
     parser.add_argument('--aug_amp_scale_max', type=float, default=1.0)
+    parser.add_argument('--aug_lead_noise_scale_max', type=float, default=1.0, help='Escala max aleatoria por derivación para jitter')
+    parser.add_argument('--aug_time_warp_max', type=float, default=0.0, help='Factor máx de warping temporal (e.g., 0.05)')
+    parser.add_argument('--aug_time_warp_p', type=float, default=0.0, help='Probabilidad de aplicar time-warp')
+    parser.add_argument('--mixup_alpha', type=float, default=0.0, help='Alpha de Beta para mixup temporal (0 desactiva)')
+    parser.add_argument('--mixup_p', type=float, default=0.0, help='Probabilidad de aplicar mixup por batch')
     parser.add_argument('--warmup_epochs', type=int, default=5)
     parser.add_argument('--scheduler_metric', type=str, default='auroc_macro', choices=['val_loss','auroc_macro'], help='Métrica para ReduceLROnPlateau')
+    parser.add_argument('--cosine_after_plateau', action='store_true', help='Activar CosineAnnealingWarmRestarts tras ReduceLROnPlateau')
+    parser.add_argument('--cosine_t0', type=int, default=10)
+    parser.add_argument('--cosine_tmult', type=int, default=1)
+    parser.add_argument('--cosine_eta_min_scale', type=float, default=0.01, help='eta_min = lr * scale')
     parser.add_argument('--dataset', type=str, default='12large', choices=['12large','ptbxl','georgia','incart'], help='Dataset a usar')
     parser.add_argument('--no_data_check', action='store_true', help='Desactivar verificación de integridad .mat al inicio')
     parser.add_argument('--no_auto_hierarchy', action='store_true', help='Desactivar generación automática de labels_hierarchy.json si falta')
     parser.add_argument('--smoke_test', action='store_true', help='Activar modo rápido con pocos ejemplos')
     parser.add_argument('--smoke_n', type=int, default=256, help='Máx ejemplos train en smoke test')
+    parser.add_argument('--use_dice_on_fine', action='store_true', help='Añadir Dice a la pérdida de fine')
+    parser.add_argument('--dice_weight', type=float, default=0.5, help='Peso de Dice en la combinación híbrida')
+    parser.add_argument('--save_attn_viz', action='store_true', help='Guardar mapas de atención durante validación')
+    parser.add_argument('--attn_viz_max_batches', type=int, default=2)
     args = parser.parse_args()
 
     set_seed(args.seed, deterministic=args.deterministic)
@@ -423,11 +460,16 @@ def main():
         seed=args.seed,
         use_sampler=(not args.no_sampler),
         sampler_power=args.sampler_power,
+        sampler_power_rare=args.sampler_power_rare,
+        rare_class_thresh=args.rare_class_thresh,
         aug_jitter_std=args.aug_jitter_std,
         aug_shift_max=args.aug_shift_max,
         aug_lead_drop_prob=args.aug_lead_drop_prob,
         aug_amp_scale_min=args.aug_amp_scale_min,
         aug_amp_scale_max=args.aug_amp_scale_max,
+        aug_lead_noise_scale_max=args.aug_lead_noise_scale_max,
+        aug_time_warp_max=args.aug_time_warp_max,
+        aug_time_warp_p=args.aug_time_warp_p,
         smoke_test=args.smoke_test,
         smoke_n=args.smoke_n
     )
@@ -446,12 +488,20 @@ def main():
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     # Scheduler según métrica
     sched_mode = 'min' if args.scheduler_metric == 'val_loss' else 'max'
-    scheduler = ReduceLROnPlateau(opt, mode=sched_mode, factor=0.5, patience=3, threshold=1e-4, cooldown=0, min_lr=1e-6)
+    scheduler = ReduceLROnPlateau(opt, mode=sched_mode, factor=0.5, patience=5, threshold=1e-4, cooldown=0, min_lr=1e-6)
+    cosine_sched = None
+    if getattr(args, 'cosine_after_plateau', False):
+        cosine_sched = CosineAnnealingWarmRestarts(
+            opt,
+            T_0=max(1, args.cosine_t0),
+            T_mult=max(1, args.cosine_tmult),
+            eta_min=args.lr * float(max(0.0, args.cosine_eta_min_scale))
+        )
     # Criterio
     if args.loss_type == 'asl':
-        criterion = AsymmetricLossMultiLabel(gamma_pos=args.gamma_pos, gamma_neg=args.gamma_neg, clip=args.asl_clip)
+        base_loss_fn = AsymmetricLossMultiLabel(gamma_pos=args.gamma_pos, gamma_neg=args.gamma_neg, clip=args.asl_clip)
     else:
-        def criterion(logits, targets):
+        def base_loss_fn(logits, targets):
             return focal_loss_multi_label(logits, targets, alpha=args.focal_alpha, gamma=args.focal_gamma)
     scaler = GradScaler(enabled=args.mixed_precision and device.type=='cuda')
 
@@ -476,10 +526,26 @@ def main():
             x = batch['samples'].to(device, non_blocking=True)
             y_coarse = batch['labels_coarse'].to(device, non_blocking=True)
             y_fine = batch['labels_fine'].to(device, non_blocking=True)
+            # Mixup temporal por batch (opcional)
+            use_mixup = (getattr(args, 'mixup_alpha', 0.0) > 0.0 and np.random.rand() < getattr(args, 'mixup_p', 0.0))
+            if use_mixup:
+                lam = np.random.beta(args.mixup_alpha, args.mixup_alpha)
+                perm = torch.randperm(x.size(0), device=x.device)
+                x = lam * x + (1.0 - lam) * x[perm]
+                y_coarse_mix = lam * y_coarse + (1.0 - lam) * y_coarse[perm]
+                y_fine_mix = lam * y_fine + (1.0 - lam) * y_fine[perm]
+            else:
+                y_coarse_mix = y_coarse
+                y_fine_mix = y_fine
             with autocast_cuda(args.mixed_precision and device.type=='cuda'):
                 logits_coarse, logits_fine = model(x)
-                loss_coarse = criterion(logits_coarse, y_coarse)
-                loss_fine = criterion(logits_fine, y_fine)
+                loss_coarse = base_loss_fn(logits_coarse, y_coarse_mix)
+                if getattr(args, 'use_dice_on_fine', False):
+                    base_l = base_loss_fn(logits_fine, y_fine_mix)
+                    dice_l = dice_loss_multilabel(logits_fine, y_fine_mix)
+                    loss_fine = (1.0 - float(getattr(args, 'dice_weight', 0.5))) * base_l + float(getattr(args, 'dice_weight', 0.5)) * dice_l
+                else:
+                    loss_fine = base_loss_fn(logits_fine, y_fine_mix)
                 # consistencia basada en predicciones
                 p_fine = torch.sigmoid(logits_fine)
                 max_per_group_pred = []
@@ -511,7 +577,15 @@ def main():
             train_n += x.size(0)
 
         # validación
-        val_loss, val_metrics = evaluate(model, va_dl, fine_code_to_idx, coarse_groups, criterion, compute_stats=True)
+        # Visualización de atención opcional durante validación
+        attn_dir = None
+        if getattr(args, 'save_attn_viz', False):
+            attn_dir = os.path.join(exp_root, 'attn_maps')
+        val_loss, val_metrics = evaluate(
+            model, va_dl, fine_code_to_idx, coarse_groups, base_loss_fn, compute_stats=True,
+            use_dice_on_fine=getattr(args, 'use_dice_on_fine', False), dice_weight=getattr(args, 'dice_weight', 0.5),
+            save_attn=getattr(args, 'save_attn_viz', False), attn_dir=attn_dir, attn_viz_max_batches=getattr(args, 'attn_viz_max_batches', 0)
+        )
         train_mean = train_sum / max(1, train_n)
         current_lr = opt.param_groups[0]['lr']
         with open(log_path, 'a', encoding='utf-8') as f:
@@ -535,6 +609,8 @@ def main():
                 scheduler.step(val_loss)
             else:
                 scheduler.step(val_metrics.get('auroc_macro', float('nan')))
+            if cosine_sched is not None:
+                cosine_sched.step(epoch)
 
         # Comprobar Early Stopping
         if args.early_stopping_patience > 0 and epochs_no_improve >= args.early_stopping_patience:
@@ -548,7 +624,10 @@ def main():
         model.load_state_dict(state['model'])
         print('Evaluando en test con mejor checkpoint...')
         # Optimización de umbrales por clase usando validación si está disponible
-        val_loss_best, val_metrics_best = evaluate(model, va_dl, fine_code_to_idx, coarse_groups, criterion, compute_stats=True)
+        val_loss_best, val_metrics_best = evaluate(
+            model, va_dl, fine_code_to_idx, coarse_groups, base_loss_fn, compute_stats=True,
+            use_dice_on_fine=getattr(args, 'use_dice_on_fine', False), dice_weight=getattr(args, 'dice_weight', 0.5)
+        )
         y_true_val = val_metrics_best.get('y_true', None)
         y_prob_val = val_metrics_best.get('y_prob', None)
         class_thresholds = None
@@ -577,7 +656,10 @@ def main():
                 class_thresholds = None
 
         # TTA/Multi-crop en test: promediar probabilidades de k ventanas si la señal es > sequence_len
-        test_loss, test_metrics = evaluate(model, te_dl, fine_code_to_idx, coarse_groups, criterion, compute_stats=True)
+        test_loss, test_metrics = evaluate(
+            model, te_dl, fine_code_to_idx, coarse_groups, base_loss_fn, compute_stats=True,
+            use_dice_on_fine=getattr(args, 'use_dice_on_fine', False), dice_weight=getattr(args, 'dice_weight', 0.5)
+        )
         print(f"Test loss: {test_loss:.4f} | AUROC_macro: {test_metrics.get('auroc_macro', float('nan')):.4f} | AUPRC_macro: {test_metrics.get('auprc_macro', float('nan')):.4f} | F1_macro: {test_metrics.get('f1_macro', float('nan')):.4f}")
         # Recalcular F1 usando umbrales por-clase si los tenemos
         if class_thresholds is not None:

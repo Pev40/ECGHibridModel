@@ -11,12 +11,12 @@ REPO_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, '..'))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from datasets.wfdb_dataset import _load_signal_mat
-from datasets.wfdb_dataset import _parse_header_labels
+from datasets.ecg12large import _load_signal_mat
+from datasets.ecg12large import _parse_header_labels
 
 
 def main():
-    root = os.path.join('datos', 'WFDBRecords')
+    root = os.path.join('datos', 'ECG12Large', 'WFDBRecords')
     cache_dir = os.path.join('datos', 'pt_cache')
     os.makedirs(cache_dir, exist_ok=True)
 

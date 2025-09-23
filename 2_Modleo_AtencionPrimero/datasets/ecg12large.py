@@ -7,6 +7,7 @@ from collections import Counter
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+import torch.nn.functional as F
 
 try:
     from scipy.io import loadmat
@@ -161,7 +162,8 @@ class ECG12Large(Dataset):
                  multilabel=False, hierarchy_path=None, cache_dir=None, random_crop=True,
                  target_fs=500.0, bandpass_hz=(0.5, 45.0), notch_hz=None, eval_mode=False,
                  aug_jitter_std=0.0, aug_shift_max=0, aug_lead_drop_prob=0.0,
-                 aug_amp_scale_min=1.0, aug_amp_scale_max=1.0):
+                 aug_amp_scale_min=1.0, aug_amp_scale_max=1.0,
+                 aug_lead_noise_scale_max=1.0, aug_time_warp_max=0.0, aug_time_warp_p=0.0):
         super().__init__()
         self.root_dir = root_dir
         if files is None:
@@ -184,6 +186,9 @@ class ECG12Large(Dataset):
         self.aug_lead_drop_prob = float(aug_lead_drop_prob)
         self.aug_amp_scale_min = float(aug_amp_scale_min)
         self.aug_amp_scale_max = float(aug_amp_scale_max)
+        self.aug_lead_noise_scale_max = float(aug_lead_noise_scale_max)
+        self.aug_time_warp_max = float(aug_time_warp_max)
+        self.aug_time_warp_p = float(aug_time_warp_p)
 
         # Jerarquía (opcional)
         self.hierarchy = None
@@ -331,6 +336,16 @@ class ECG12Large(Dataset):
         x = torch.from_numpy(x).float()
         # Augmentaciones en modo entrenamiento
         if not self.eval_mode:
+            # Time-warp (resample ligero)
+            if self.aug_time_warp_max > 0 and np.random.rand() < self.aug_time_warp_p:
+                L = x.shape[1]
+                wf = float(np.random.uniform(max(0.5, 1.0 - self.aug_time_warp_max), 1.0 + self.aug_time_warp_max))
+                xw = F.interpolate(x.unsqueeze(0), scale_factor=(1.0, wf), mode='bilinear', align_corners=False).squeeze(0)
+                if xw.shape[1] >= L:
+                    x = xw[:, :L]
+                else:
+                    pad = torch.zeros(x.shape[0], L - xw.shape[1], dtype=x.dtype, device=x.device)
+                    x = torch.cat([xw, pad], dim=1)
             # Shift temporal (circular)
             if self.aug_shift_max > 0:
                 shift = int(np.random.randint(-self.aug_shift_max, self.aug_shift_max + 1))
@@ -338,7 +353,13 @@ class ECG12Large(Dataset):
                     x = torch.roll(x, shifts=shift, dims=1)
             # Jitter gaussiano
             if self.aug_jitter_std > 0:
-                x = x + torch.randn_like(x) * float(self.aug_jitter_std)
+                if self.aug_lead_noise_scale_max and self.aug_lead_noise_scale_max > 1.0:
+                    c = x.shape[0]
+                    scales = torch.empty(c, device=x.device).uniform_(1.0/self.aug_lead_noise_scale_max, self.aug_lead_noise_scale_max).view(-1,1)
+                    noise = torch.randn_like(x) * float(self.aug_jitter_std) * scales
+                    x = x + noise
+                else:
+                    x = x + torch.randn_like(x) * float(self.aug_jitter_std)
             # Lead dropout
             if self.aug_lead_drop_prob > 0:
                 c = x.shape[0]

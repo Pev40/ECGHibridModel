@@ -211,6 +211,7 @@ def compute_micro_roc(y_true, y_prob):
 
 
 def plot_combined_micro_roc(run_dirs, out_path):
+    print('Plotting combined micro ROC; run_dirs:', out_path)
     plt.figure(figsize=(8, 6))
     any_plotted = False
     for d in run_dirs:
@@ -236,6 +237,7 @@ def plot_combined_micro_roc(run_dirs, out_path):
 
 
 def plot_evolution_val_auroc(run_dirs, out_path):
+    print('Plotting evolution of AUROC; run_dirs:', out_path)
     plt.figure(figsize=(10, 6))
     any_plotted = False
     for d in run_dirs:
@@ -265,6 +267,7 @@ def plot_evolution_val_auroc(run_dirs, out_path):
 
 
 def plot_evolution_val_auprc(run_dirs, out_path):
+    print('Plotting evolution of AUPRC; run_dirs:', out_path)
     plt.figure(figsize=(10, 6))
     any_plotted = False
     for d in run_dirs:
@@ -328,7 +331,7 @@ def plot_combined_micro_pr(run_dirs, out_path):
 
 def main():
     parser = argparse.ArgumentParser(description='Evaluación y gráficas a partir de resultados guardados')
-    parser.add_argument('--root', type=str, default=os.path.join('Resultado', 'all_datasets_20250922_224831'), help='Carpeta raíz con subcarpetas por dataset')
+    parser.add_argument('--root', type=str, default=os.path.join('Resultado',"DespuesTuning","all_datasets_20250923_135105"), help='Carpeta raíz con subcarpetas por dataset')
     parser.add_argument('--save', action='store_true', help='Guardar figuras en disco')
     args = parser.parse_args()
 
