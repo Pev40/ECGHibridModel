@@ -490,6 +490,7 @@ def main():
     parser.add_argument('--gamma_pos', type=float, default=0.0)
     parser.add_argument('--gamma_neg', type=float, default=4.0)
     parser.add_argument('--asl_clip', type=float, default=0.05)
+    parser.add_argument('--label_smoothing', type=float, default=0.0, help='Smoothing para etiquetas multilabel (aplicado antes de la pérdida)')
     parser.add_argument('--loss_type', type=str, default='asl', choices=['asl','focal'], help='Tipo de pérdida para multilabel')
     parser.add_argument('--focal_alpha', type=float, default=0.25)
     parser.add_argument('--focal_gamma', type=float, default=2.0)
@@ -514,6 +515,10 @@ def main():
     parser.add_argument('--cosine_t0', type=int, default=10)
     parser.add_argument('--cosine_tmult', type=int, default=1)
     parser.add_argument('--cosine_eta_min_scale', type=float, default=0.01, help='eta_min = lr * scale')
+    # Stockwell/Swin controles
+    parser.add_argument('--freq_bins_low', type=int, default=1, help='Bin inicial (>=1) para S-Transform')
+    parser.add_argument('--freq_bins_high', type=int, default=65, help='Bin final (exclusivo) para S-Transform')
+    parser.add_argument('--swin_freeze_stages', type=int, default=0, help='Número de stages iniciales del Swin a congelar (0=no congelar)')
     parser.add_argument('--dataset', type=str, default='12large', choices=['12large','ptbxl','georgia','incart'], help='Dataset a usar')
     parser.add_argument('--no_data_check', action='store_true', help='Desactivar verificación de integridad .mat al inicio')
     parser.add_argument('--no_auto_hierarchy', action='store_true', help='Desactivar generación automática de labels_hierarchy.json si falta')
@@ -634,7 +639,9 @@ def main():
                 attn_dropout=(args.attn_dropout if args.attn_dropout is not None else args.dropout),
                 trans_dropout=args.trans_dropout,
                 mid_channels=64, final_out_channels=128, trans_dim=64, num_heads=4, num_leads=12,
-                num_fine=len(fine_codes), num_coarse=len(coarse_groups)
+                num_fine=len(fine_codes), num_coarse=len(coarse_groups),
+                stockwell_freq_low=max(1, int(args.freq_bins_low)), stockwell_freq_high=max(2, int(args.freq_bins_high)),
+                swin_freeze_stages=max(0, int(args.swin_freeze_stages))
             ))
             if _use_v2:
                 model = ECGHybridVariableBeforeBiTransV2(configs, {"feature_dim": 128}).to(device)
@@ -692,6 +699,12 @@ def main():
                         else:
                             y_coarse_mix = y_coarse
                             y_fine_mix = y_fine
+
+                    # Label smoothing opcional
+                    if float(getattr(args, 'label_smoothing', 0.0)) > 0.0:
+                        eps = float(args.label_smoothing)
+                        y_coarse_mix = (1.0 - eps) * y_coarse_mix + 0.5 * eps
+                        y_fine_mix = (1.0 - eps) * y_fine_mix + 0.5 * eps
 
                     with autocast_cuda(args.mixed_precision and device.type=='cuda'):
                         logits_coarse, logits_fine = model(x)
@@ -819,7 +832,9 @@ def main():
         attn_dropout=(args.attn_dropout if args.attn_dropout is not None else args.dropout),
         trans_dropout=args.trans_dropout,
         mid_channels=64, final_out_channels=128, trans_dim=64, num_heads=4, num_leads=12,
-        num_fine=len(fine_codes), num_coarse=len(coarse_groups)
+        num_fine=len(fine_codes), num_coarse=len(coarse_groups),
+        stockwell_freq_low=max(1, int(args.freq_bins_low)), stockwell_freq_high=max(2, int(args.freq_bins_high)),
+        swin_freeze_stages=max(0, int(args.swin_freeze_stages))
     ))
     if _use_v2:
         model = ECGHybridVariableBeforeBiTransV2(configs, {"feature_dim": 128}).to(device)
@@ -884,6 +899,11 @@ def main():
                 else:
                     y_coarse_mix = y_coarse
                     y_fine_mix = y_fine
+            # Label smoothing opcional
+            if float(getattr(args, 'label_smoothing', 0.0)) > 0.0:
+                eps = float(args.label_smoothing)
+                y_coarse_mix = (1.0 - eps) * y_coarse_mix + 0.5 * eps
+                y_fine_mix = (1.0 - eps) * y_fine_mix + 0.5 * eps
             with autocast_cuda(args.mixed_precision and device.type=='cuda'):
                 logits_coarse, logits_fine = model(x)
                 loss_coarse = base_loss_fn(logits_coarse, y_coarse_mix)

@@ -50,6 +50,24 @@ class StockwellSwinEncoder(nn.Module):
         
         self.temporal_encoder = SwinModel(config)
         print(f"Swin Transformer adaptado para aceptar {self.swin_input_channels} canales (Real + Imaginario).")
+
+    def freeze_stages(self, num_stages: int = 1):
+        """Congela las primeras `num_stages` etapas del Swin para regularización/fine-tuning estable."""
+        if num_stages <= 0:
+            return
+        try:
+            # Basado en estructura típica de Swin: embeddings + layers (stages)
+            self.temporal_encoder.embeddings.eval()
+            for p in self.temporal_encoder.embeddings.parameters():
+                p.requires_grad = False
+            stages = list(self.temporal_encoder.encoder.layers)
+            for i, layer in enumerate(stages):
+                if i < num_stages:
+                    layer.eval()
+                    for p in layer.parameters():
+                        p.requires_grad = False
+        except Exception:
+            pass
         
     def _pad_to_multiples(self, x: torch.Tensor, cfg: SwinConfig) -> torch.Tensor:
         """Padding para que H y W sean múltiplos de patch*2^(stages-1)*window_size.

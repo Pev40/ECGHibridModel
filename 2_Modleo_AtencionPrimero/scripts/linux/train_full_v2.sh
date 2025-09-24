@@ -23,44 +23,48 @@ python scripts/cache_wfdb_to_pt.py || true
 
 # Defaults (override with env vars)
 SEQ_LEN=${SEQ_LEN:-5000}
-BATCH_SIZE=${BATCH_SIZE:-128}
+BATCH_SIZE=${BATCH_SIZE:-256}
 WORKERS=${WORKERS:-16}
-LR=${LR:-1e-3}
-WD=${WD:-1e-4}
-EPOCHS=${EPOCHS:-60}
+LR=${LR:-3e-4}
+WD=${WD:-1e-3}
+EPOCHS=${EPOCHS:-100}
 ACCUM=${ACCUM:-1}
-DROPOUT=${DROPOUT:-0.3}
-ATTN_DROPOUT=${ATTN_DROPOUT:-0.3}
-TRANS_DROPOUT=${TRANS_DROPOUT:-0.1}
-GAMMA_POS=${GAMMA_POS:-0.0}
-GAMMA_NEG=${GAMMA_NEG:-4.0}
-ASL_CLIP=${ASL_CLIP:-0.05}
-SAMPLER_POWER=${SAMPLER_POWER:-1.0}
-SAMPLER_POWER_RARE=${SAMPLER_POWER_RARE:-1.0}
+DROPOUT=${DROPOUT:-0.4}
+ATTN_DROPOUT=${ATTN_DROPOUT:-0.4}
+TRANS_DROPOUT=${TRANS_DROPOUT:-0.2}
+GAMMA_POS=${GAMMA_POS:-1.0}
+GAMMA_NEG=${GAMMA_NEG:-5.0}
+ASL_CLIP=${ASL_CLIP:-0.01}
+SAMPLER_POWER=${SAMPLER_POWER:-0.5}
+SAMPLER_POWER_RARE=${SAMPLER_POWER_RARE:-1.5}
 RARE_THRESH=${RARE_THRESH:-0.01}
-WARMUP_EPOCHS=${WARMUP_EPOCHS:-5}
-SCHED_METRIC=${SCHED_METRIC:-auroc_macro}
+WARMUP_EPOCHS=${WARMUP_EPOCHS:-10}
+SCHED_METRIC=${SCHED_METRIC:-val_loss}
 DATASET=${DATASET:-12large}  # one of: 12large, ptbxl, georgia, incart
 
 # Augmentations
-AUG_JITTER_STD=${AUG_JITTER_STD:-0.0}
-AUG_SHIFT_MAX=${AUG_SHIFT_MAX:-0}
-AUG_LEAD_DROP=${AUG_LEAD_DROP:-0.0}
-AUG_AMP_MIN=${AUG_AMP_MIN:-1.0}
-AUG_AMP_MAX=${AUG_AMP_MAX:-1.0}
-AUG_LEAD_NOISE_MAX=${AUG_LEAD_NOISE_MAX:-1.0}
-AUG_TIME_WARP_MAX=${AUG_TIME_WARP_MAX:-0.0}
-AUG_TIME_WARP_P=${AUG_TIME_WARP_P:-0.0}
+AUG_JITTER_STD=${AUG_JITTER_STD:-0.01}
+AUG_SHIFT_MAX=${AUG_SHIFT_MAX:-50}
+AUG_LEAD_DROP=${AUG_LEAD_DROP:-0.05}
+AUG_AMP_MIN=${AUG_AMP_MIN:-0.9}
+AUG_AMP_MAX=${AUG_AMP_MAX:-1.1}
+AUG_LEAD_NOISE_MAX=${AUG_LEAD_NOISE_MAX:-2.0}
+AUG_TIME_WARP_MAX=${AUG_TIME_WARP_MAX:-0.05}
+AUG_TIME_WARP_P=${AUG_TIME_WARP_P:-0.5}
 
 # Mixup
-MIXUP_ALPHA=${MIXUP_ALPHA:-0.0}
-MIXUP_P=${MIXUP_P:-0.0}
+MIXUP_ALPHA=${MIXUP_ALPHA:-0.2}
+MIXUP_P=${MIXUP_P:-0.5}
 
 # Notch and bandpass
 BANDPASS_LOW=${BANDPASS_LOW:-0.5}
 BANDPASS_HIGH=${BANDPASS_HIGH:-45.0}
 TARGET_FS=${TARGET_FS:-500.0}
 NOTCH_HZ=${NOTCH_HZ:-0}  # 50 or 60; 0 to disable
+LABEL_SMOOTH=${LABEL_SMOOTH:-0.1}
+FREQ_LOW=${FREQ_LOW:-1}
+FREQ_HIGH=${FREQ_HIGH:-32}
+SWIN_FREEZE=${SWIN_FREEZE:-1}
 
 python train_full_v2.py \
   --sequence_len "${SEQ_LEN}" \
@@ -77,6 +81,7 @@ python train_full_v2.py \
   --gamma_pos "${GAMMA_POS}" \
   --gamma_neg "${GAMMA_NEG}" \
   --asl_clip "${ASL_CLIP}" \
+  --label_smoothing "${LABEL_SMOOTH}" \
   --sampler_power "${SAMPLER_POWER}" \
   --sampler_power_rare "${SAMPLER_POWER_RARE}" \
   --rare_class_thresh "${RARE_THRESH}" \
@@ -96,6 +101,9 @@ python train_full_v2.py \
   --bandpass_low "${BANDPASS_LOW}" \
   --bandpass_high "${BANDPASS_HIGH}" \
   $( [[ "${NOTCH_HZ}" == "50" || "${NOTCH_HZ}" == "60" ]] && echo --notch_hz "${NOTCH_HZ}" ) \
+  --freq_bins_low "${FREQ_LOW}" \
+  --freq_bins_high "${FREQ_HIGH}" \
+  --swin_freeze_stages "${SWIN_FREEZE}" \
   --dataset "${DATASET}" \
   --cache_dir datos/pt_cache \
   --exp_dir "${EXP_DIR}"
