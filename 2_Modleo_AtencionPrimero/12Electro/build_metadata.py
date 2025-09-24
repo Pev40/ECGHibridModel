@@ -59,36 +59,7 @@ def parse_12large_labels(hea_path: str) -> List[str]:
     return labels
 
 
-def parse_age_sex_from_header(hea_path: str) -> Dict[str, Optional[str]]:
-    """Extrae edad y sexo de las líneas #Age: y #Sex: en el header WFDB."""
-    age = sex = None
-    try:
-        with open(hea_path, "r", encoding="utf-8", errors="ignore") as f:
-            for ln in f:
-                if ln.startswith("#Age:"):
-                    m = re.search(r"#Age:\s*(\d+)", ln, re.IGNORECASE)
-                    if m:
-                        age = int(m.group(1))
-                elif ln.startswith("#Sex:"):
-                    m = re.search(r"#Sex:\s*(M|F|Male|Female)", ln, re.IGNORECASE)
-                    if m:
-                        sex_val = m.group(1).upper()
-                        sex = "M" if sex_val in ["M", "MALE"] else "F" if sex_val in ["F", "FEMALE"] else None
-                if age is not None and sex is not None:
-                    break  # Optimiza: sale temprano si ya tiene ambos
-    except Exception:
-        pass
-    return {"age": age, "sex": sex}
-
-
 def extract_patient_id_from_header(hea_path: str, root_dir: Optional[str] = None) -> Optional[str]:
-    """Extrae patient_id priorizando el stem del archivo (e.g., JS00001), luego #Patient ID: o fallback a carpeta solo si falla."""
-    # Prioridad 1: Stem del basename (único por .hea en Chapman-Shaoxing)
-    stem = os.path.splitext(os.path.basename(hea_path))[0]
-    if re.match(r"JS\d{5}", stem):  # Patrón típico: JS00001
-        return stem
-    
-    # Prioridad 2: Busca en header #Patient ID: o similar
     pid = None
     try:
         with open(hea_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -100,21 +71,17 @@ def extract_patient_id_from_header(hea_path: str, root_dir: Optional[str] = None
                         break
     except Exception:
         pass
-    
-    # Prioridad 3: Fallback a carpeta solo si root_dir (pero evítalo; usa stem si posible)
     if pid is None and root_dir is not None:
         try:
             rel = os.path.relpath(hea_path, root_dir)
             parts = rel.split(os.sep)
-            if len(parts) >= 3:  # e.g., 01/010/JS00001.hea → usa JS00001 del basename
-                pid = os.path.splitext(parts[-1])[0]
-            elif len(parts) >= 2:
-                pid = parts[-2]  # Solo si no hay stem claro
+            if len(parts) >= 2:
+                pid = parts[0]
         except Exception:
-            pid = stem.split("_")[0] if "_" in stem else stem
-    else:
-        pid = stem.split("_")[0] if "_" in stem else stem  # Fallback genérico
-    
+            pid = None
+    if pid is None:
+        stem = os.path.splitext(os.path.basename(hea_path))[0]
+        pid = re.split(r"[_\-]", stem)[0]
     return pid
 
 
@@ -128,15 +95,12 @@ def build_metadata_12large(root_dir: str, out_csv: str) -> None:
                 mat_path = stem + ".mat"
                 info = parse_wfdb_header_first_line(hea)
                 labels = parse_12large_labels(hea)
-                demo = parse_age_sex_from_header(hea)  # NUEVO: Extrae age y sex
-                pid = extract_patient_id_from_header(hea, root_dir)  # MEJORADO: Prioriza stem
+                pid = extract_patient_id_from_header(hea, root_dir)
                 rows.append(
                     {
                         "hea_path": os.path.relpath(hea, root_dir),
                         "mat_exists": os.path.exists(mat_path),
                         "patient_id": pid,
-                        "age": demo.get("age"),  # NUEVO
-                        "sex": demo.get("sex"),  # NUEVO
                         "num_leads": info.get("num_leads"),
                         "fs": info.get("fs"),
                         "num_samples": info.get("num_samples"),
@@ -210,3 +174,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
