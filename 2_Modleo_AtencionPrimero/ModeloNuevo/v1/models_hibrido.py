@@ -57,8 +57,9 @@ class ECGHybridVariableBeforeBiTrans(nn.Module):
 
         # Atención Variable del VTT opera sobre [B, T, F, D]
         attn_do = getattr(configs, 'attn_dropout', getattr(configs, 'dropout', 0.0))
-        self.var_attn = VariableAttention(dim=self.d_model, heads=self.num_heads, dim_head=self.d_model, dropout=attn_do)
-
+        dim_head = self.d_model // self.num_heads  # Asegura divisibilidad; si no, usa // y ajusta
+        self.var_attn = VariableAttention(dim=self.d_model, heads=self.num_heads, dim_head=dim_head, dropout=attn_do)   
+        
         # Bi-Transformer temporal (igual que el ECGTransForm)
         trans_do = getattr(configs, 'trans_dropout', 0.1)
         self.encoder_layer = nn.TransformerEncoderLayer(d_model=self.d_model, nhead=self.num_heads, batch_first=True, dropout=trans_do)

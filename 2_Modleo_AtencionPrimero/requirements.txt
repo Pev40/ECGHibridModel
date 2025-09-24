@@ -12,4 +12,5 @@ wfdb>=3.4.1
 h5py>=3.8.0
 tqdm>=4.66.0
 PyWavelets>=1.5.0
+transformers>=4.41.0
 

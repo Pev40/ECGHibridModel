@@ -29,7 +29,7 @@ class VariableAttention(nn.Module):
         q, k, v = self.to_qkv(x).chunk(3, dim=-1)
         q, k, v = map(lambda m: rearrange(m, 'b n (h d) -> b h n d', h=h), (q, k, v))
         sim = einsum('b h i d, b h j d -> b h i j', q, k) * self.scale
-
+        sim = torch.clamp(sim, min=-50.0, max=50.0)
         attn = sim.softmax(dim=-1)
         if use_attn:
             weights = attn

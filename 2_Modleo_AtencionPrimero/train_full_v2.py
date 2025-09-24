@@ -19,7 +19,12 @@ from tqdm import tqdm
 from sklearn.metrics import roc_auc_score, average_precision_score, f1_score
 from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingWarmRestarts
 from sklearn.model_selection import StratifiedKFold
-from ModeloNuevo import ECGHybridVariableBeforeBiTrans
+try:
+    from ModeloNuevo.v2 import ECGHybridVariableBeforeBiTransV2
+    _use_v2 = True
+except Exception:
+    from ModeloNuevo.v1 import ECGHybridVariableBeforeBiTrans
+    _use_v2 = False
 from datasets.ecg12large import ECG12Large, extract_patient_id
 from datasets import PTBXL, INCART12Lead
 from losses.asymmetric_loss import AsymmetricLossMultiLabel
@@ -628,10 +633,13 @@ def main():
                 input_channels=12, sequence_len=args.sequence_len, kernel_size=8, stride=1, dropout=args.dropout,
                 attn_dropout=(args.attn_dropout if args.attn_dropout is not None else args.dropout),
                 trans_dropout=args.trans_dropout,
-                mid_channels=32, final_out_channels=128, trans_dim=32, num_heads=4, num_leads=12,
+                mid_channels=64, final_out_channels=128, trans_dim=64, num_heads=4, num_leads=12,
                 num_fine=len(fine_codes), num_coarse=len(coarse_groups)
             ))
-            model = ECGHybridVariableBeforeBiTrans(configs, {"feature_dim": 128}).to(device)
+            if _use_v2:
+                model = ECGHybridVariableBeforeBiTransV2(configs, {"feature_dim": 128}).to(device)
+            else:
+                model = ECGHybridVariableBeforeBiTrans(configs, {"feature_dim": 128}).to(device)
 
             # optim / schedulers por fold
             opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -711,7 +719,7 @@ def main():
                     scaler.scale(loss).backward()
                     if step % args.accum_steps == 0:
                         scaler.unscale_(opt)
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
                         if epoch <= args.warmup_epochs:
                             for pg in opt.param_groups:
                                 base_lr = args.lr
@@ -810,10 +818,13 @@ def main():
         input_channels=12, sequence_len=args.sequence_len, kernel_size=8, stride=1, dropout=args.dropout,
         attn_dropout=(args.attn_dropout if args.attn_dropout is not None else args.dropout),
         trans_dropout=args.trans_dropout,
-        mid_channels=32, final_out_channels=128, trans_dim=32, num_heads=4, num_leads=12,
+        mid_channels=64, final_out_channels=128, trans_dim=64, num_heads=4, num_leads=12,
         num_fine=len(fine_codes), num_coarse=len(coarse_groups)
     ))
-    model = ECGHybridVariableBeforeBiTrans(configs, {"feature_dim": 128}).to(device)
+    if _use_v2:
+        model = ECGHybridVariableBeforeBiTransV2(configs, {"feature_dim": 128}).to(device)
+    else:
+        model = ECGHybridVariableBeforeBiTrans(configs, {"feature_dim": 128}).to(device)
 
     # optim / loss
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -899,7 +910,15 @@ def main():
             scaler.scale(loss).backward()
             if step % args.accum_steps == 0:
                 scaler.unscale_(opt)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5
+                
+                
+                
+                
+                
+                
+                
+                )
                 # Warmup: escalar el LR durante las primeras warmup_epochs
                 if epoch <= args.warmup_epochs:
                     for pg in opt.param_groups:
