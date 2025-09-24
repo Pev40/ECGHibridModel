@@ -126,9 +126,9 @@ class ECGHybridVariableBeforeBiTransV2(nn.Module):
         x_tok = x_td.view(b, t_seg, token_size, d)
         return x_tok
 
-    def _encode_sequence(self, x_feat: torch.Tensor) -> torch.Tensor:
+    def _encode_sequence(self, x_feat: torch.Tensor):
         """
-        x_feat: [B, C_mid, T'] -> salida de Swin: [B, trans_dim]
+        x_feat: [B, C_mid, T'] -> devuelve (x_vec, x_coarse_vec, x_fine_vec)
         """
         # Proyección a D y permutar a [B, T, D]
         x_proj = self.proj_act(self.proj_bn(self.proj_to_trans(x_feat)))  # [B, D, T']
@@ -149,16 +149,25 @@ class ECGHybridVariableBeforeBiTransV2(nn.Module):
         x_var = 0.5 * (x_coarse_vec + x_fine_vec)                           # [B, T_seg, D]
         x_enc = self.temporal_encoder(x_var)                                # [B, E]
         x_enc = self.head_embed(x_enc)                                      # [B, D]
-        return x_enc
+        return x_enc, x_coarse_vec, x_fine_vec
 
     def forward(self, x: torch.Tensor):
         # x: [B, 12, T]
         x_feat = self.feature_extractor(x)            # [B, C_mid, T/2]
         x_feat = self.gsa(x_feat)                     # [B, C_mid, T/2]
-        x_vec = self._encode_sequence(x_feat)         # [B, D]
+        x_vec, _, _ = self._encode_sequence(x_feat)
         logits_coarse = self.head_coarse(x_vec)       # [B, num_coarse]
         logits_fine = self.head_fine(x_vec)           # [B, num_fine]
         return logits_coarse, logits_fine
+
+    def forward_with_aux(self, x: torch.Tensor):
+        """Devuelve logits y features intermedios para pérdidas auxiliares."""
+        x_feat = self.feature_extractor(x)
+        x_feat = self.gsa(x_feat)
+        x_vec, x_coarse_vec, x_fine_vec = self._encode_sequence(x_feat)
+        logits_coarse = self.head_coarse(x_vec)
+        logits_fine = self.head_fine(x_vec)
+        return logits_coarse, logits_fine, x_coarse_vec, x_fine_vec
 
     def forward_with_attn(self, x: torch.Tensor):
         # Compatibilidad con rutina de evaluación; mapas de atención no expuestos en esta versión

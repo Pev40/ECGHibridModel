@@ -48,7 +48,15 @@ class StockwellSwinEncoder(nn.Module):
         config.patch_size = (4, 4)
         config.window_size = 2
         
-        self.temporal_encoder = SwinModel(config)
+        try:
+            # Intentar cargar pesos preentrenados (offline si ya están en caché)
+            self.temporal_encoder = SwinModel.from_pretrained(
+                swin_model_name, config=config, ignore_mismatched_sizes=True
+            )
+            print("Cargado SwinModel preentrenado con ignore_mismatched_sizes.")
+        except Exception:
+            self.temporal_encoder = SwinModel(config)
+            print("Usando SwinModel sin pesos preentrenados (fallback). Considera pretrain manual.")
         print(f"Swin Transformer adaptado para aceptar {self.swin_input_channels} canales (Real + Imaginario).")
 
     def freeze_stages(self, num_stages: int = 1):

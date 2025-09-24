@@ -473,7 +473,7 @@ def main():
     parser.add_argument('--weight_decay', type=float, default=1e-4)
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--accum_steps', type=int, default=1)
-    parser.add_argument('--early_stopping_patience', type=int, default=10, help='Épocas sin mejora en val_loss para detener el entrenamiento. 0 para desactivar.')
+    parser.add_argument('--early_stopping_patience', type=int, default=15, help='Épocas sin mejora en val_loss para detener el entrenamiento. 0 para desactivar.')
     parser.add_argument('--early_stopping_min_delta', type=float, default=1e-4, help='Mejora mínima en val_loss para resetear la paciencia.')
     parser.add_argument('--mixed_precision', action='store_true')
     parser.add_argument('--cache_dir', type=str, default=os.path.join('datos','pt_cache'))
@@ -707,7 +707,11 @@ def main():
                         y_fine_mix = (1.0 - eps) * y_fine_mix + 0.5 * eps
 
                     with autocast_cuda(args.mixed_precision and device.type=='cuda'):
-                        logits_coarse, logits_fine = model(x)
+                        # Permitir pérdidas auxiliares si el modelo lo soporta
+                        if hasattr(model, 'forward_with_aux'):
+                            logits_coarse, logits_fine, x_coarse_vec, x_fine_vec = model.forward_with_aux(x)
+                        else:
+                            logits_coarse, logits_fine = model(x)
                         loss_coarse = base_loss_fn(logits_coarse, y_coarse_mix)
                         if getattr(args, 'use_dice_on_fine', False):
                             base_l = base_loss_fn(logits_fine, y_fine_mix)
@@ -728,6 +732,23 @@ def main():
                         max_per_group_pred = torch.stack(max_per_group_pred, dim=1)
                         cons = nn.functional.binary_cross_entropy_with_logits(logits_coarse, max_per_group_pred.detach())
                         loss = 0.5*loss_coarse + 1.0*loss_fine + 0.5*cons
+                        # Aux loss: alinear media de embeddings coarse con labels_coarse
+                        if 'x_coarse_vec' in locals():
+                            try:
+                                coarse_pred_aux = x_coarse_vec.mean(dim=1)  # [B, D]
+                                # Mapear D->num_coarse temporalmente con head_coarse weights si existen
+                                if hasattr(model, 'head_coarse') and isinstance(model.head_coarse, nn.Sequential):
+                                    head_last = model.head_coarse[-1]
+                                    if isinstance(head_last, nn.Linear) and head_last.in_features == coarse_pred_aux.shape[-1]:
+                                        coarse_logits_aux = head_last(coarse_pred_aux)
+                                    else:
+                                        coarse_logits_aux = nn.Linear(coarse_pred_aux.shape[-1], y_coarse.shape[-1]).to(device)(coarse_pred_aux)
+                                else:
+                                    coarse_logits_aux = nn.Linear(coarse_pred_aux.shape[-1], y_coarse.shape[-1]).to(device)(coarse_pred_aux)
+                                aux_loss = nn.functional.binary_cross_entropy_with_logits(coarse_logits_aux, y_coarse)
+                                loss = loss + 0.5 * aux_loss
+                            except Exception:
+                                pass
 
                     scaler.scale(loss).backward()
                     if step % args.accum_steps == 0:
@@ -905,7 +926,10 @@ def main():
                 y_coarse_mix = (1.0 - eps) * y_coarse_mix + 0.5 * eps
                 y_fine_mix = (1.0 - eps) * y_fine_mix + 0.5 * eps
             with autocast_cuda(args.mixed_precision and device.type=='cuda'):
-                logits_coarse, logits_fine = model(x)
+                if hasattr(model, 'forward_with_aux'):
+                    logits_coarse, logits_fine, x_coarse_vec, x_fine_vec = model.forward_with_aux(x)
+                else:
+                    logits_coarse, logits_fine = model(x)
                 loss_coarse = base_loss_fn(logits_coarse, y_coarse_mix)
                 if getattr(args, 'use_dice_on_fine', False):
                     base_l = base_loss_fn(logits_fine, y_fine_mix)
@@ -926,6 +950,21 @@ def main():
                 max_per_group_pred = torch.stack(max_per_group_pred, dim=1)
                 cons = nn.functional.binary_cross_entropy_with_logits(logits_coarse, max_per_group_pred.detach())
                 loss = 0.5*loss_coarse + 1.0*loss_fine + 0.5*cons
+                if 'x_coarse_vec' in locals():
+                    try:
+                        coarse_pred_aux = x_coarse_vec.mean(dim=1)
+                        if hasattr(model, 'head_coarse') and isinstance(model.head_coarse, nn.Sequential):
+                            head_last = model.head_coarse[-1]
+                            if isinstance(head_last, nn.Linear) and head_last.in_features == coarse_pred_aux.shape[-1]:
+                                coarse_logits_aux = head_last(coarse_pred_aux)
+                            else:
+                                coarse_logits_aux = nn.Linear(coarse_pred_aux.shape[-1], y_coarse.shape[-1]).to(device)(coarse_pred_aux)
+                        else:
+                            coarse_logits_aux = nn.Linear(coarse_pred_aux.shape[-1], y_coarse.shape[-1]).to(device)(coarse_pred_aux)
+                        aux_loss = nn.functional.binary_cross_entropy_with_logits(coarse_logits_aux, y_coarse)
+                        loss = loss + 0.5 * aux_loss
+                    except Exception:
+                        pass
 
             scaler.scale(loss).backward()
             if step % args.accum_steps == 0:
