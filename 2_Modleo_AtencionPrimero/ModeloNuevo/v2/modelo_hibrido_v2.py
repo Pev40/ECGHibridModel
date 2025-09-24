@@ -86,7 +86,16 @@ class ECGHybridVariableBeforeBiTransV2(nn.Module):
         # 5) Encoder temporal basado en Stockwell + Swin
         freq_low = int(getattr(configs, 'stockwell_freq_low', 1))
         freq_high = int(getattr(configs, 'stockwell_freq_high', 65))
-        self.temporal_encoder = StockwellSwinEncoder(input_dim=trans_dim, freq_bins_low=freq_low, freq_bins_high=freq_high)
+        # Flags opcionales para mejorar el aprovechamiento de Swin preentrenado
+        magnitude_only = bool(getattr(configs, 'swin_magnitude_only', False))
+        adapt_to_rgb = bool(getattr(configs, 'swin_adapt_to_rgb', False))
+        self.temporal_encoder = StockwellSwinEncoder(
+            input_dim=trans_dim,
+            freq_bins_low=freq_low,
+            freq_bins_high=freq_high,
+            magnitude_only=magnitude_only,
+            adapt_to_rgb=adapt_to_rgb,
+        )
         freeze_stages = int(getattr(configs, 'swin_freeze_stages', 0))
         if hasattr(self.temporal_encoder, 'freeze_stages') and freeze_stages > 0:
             try:

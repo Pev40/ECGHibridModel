@@ -469,7 +469,7 @@ def main():
     parser.add_argument('--sequence_len', type=int, default=5000)
     parser.add_argument('--batch_size', type=int, default=128)
     parser.add_argument('--workers', type=int, default=8)
-    parser.add_argument('--lr', type=float, default=1e-3)
+    parser.add_argument('--lr', type=float, default=5e-5)
     parser.add_argument('--weight_decay', type=float, default=1e-4)
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--accum_steps', type=int, default=1)
@@ -487,7 +487,7 @@ def main():
     parser.add_argument('--dropout', type=float, default=0.3)
     parser.add_argument('--attn_dropout', type=float, default=None, help='Si se especifica, dropout específico para atención variable')
     parser.add_argument('--trans_dropout', type=float, default=0.1, help='Dropout en TransformerEncoderLayer')
-    parser.add_argument('--gamma_pos', type=float, default=0.0)
+    parser.add_argument('--gamma_pos', type=float, default=3.0)
     parser.add_argument('--gamma_neg', type=float, default=4.0)
     parser.add_argument('--asl_clip', type=float, default=0.05)
     parser.add_argument('--label_smoothing', type=float, default=0.0, help='Smoothing para etiquetas multilabel (aplicado antes de la pérdida)')
@@ -509,7 +509,7 @@ def main():
     parser.add_argument('--aug_time_warp_p', type=float, default=0.0, help='Probabilidad de aplicar time-warp')
     parser.add_argument('--mixup_alpha', type=float, default=0.0, help='Alpha de Beta para mixup temporal (0 desactiva)')
     parser.add_argument('--mixup_p', type=float, default=0.0, help='Probabilidad de aplicar mixup por batch')
-    parser.add_argument('--warmup_epochs', type=int, default=5)
+    parser.add_argument('--warmup_epochs', type=int, default=20)
     parser.add_argument('--scheduler_metric', type=str, default='auroc_macro', choices=['val_loss','auroc_macro'], help='Métrica para ReduceLROnPlateau')
     parser.add_argument('--cosine_after_plateau', action='store_true', help='Activar CosineAnnealingWarmRestarts tras ReduceLROnPlateau')
     parser.add_argument('--cosine_t0', type=int, default=10)
@@ -518,7 +518,9 @@ def main():
     # Stockwell/Swin controles
     parser.add_argument('--freq_bins_low', type=int, default=1, help='Bin inicial (>=1) para S-Transform')
     parser.add_argument('--freq_bins_high', type=int, default=65, help='Bin final (exclusivo) para S-Transform')
-    parser.add_argument('--swin_freeze_stages', type=int, default=0, help='Número de stages iniciales del Swin a congelar (0=no congelar)')
+    parser.add_argument('--swin_freeze_stages', type=int, default=1, help='Número de stages iniciales del Swin a congelar (0=no congelar)')
+    parser.add_argument('--swin_magnitude_only', action='store_true', help='Usar solo magnitud de Stockwell para Swin (reduce mismatch)')
+    parser.add_argument('--swin_adapt_to_rgb', action='store_true', help='Proyectar canales a 3 (RGB) para mejor transferencia')
     parser.add_argument('--dataset', type=str, default='12large', choices=['12large','ptbxl','georgia','incart'], help='Dataset a usar')
     parser.add_argument('--no_data_check', action='store_true', help='Desactivar verificación de integridad .mat al inicio')
     parser.add_argument('--no_auto_hierarchy', action='store_true', help='Desactivar generación automática de labels_hierarchy.json si falta')
@@ -641,7 +643,9 @@ def main():
                 mid_channels=64, final_out_channels=128, trans_dim=64, num_heads=4, num_leads=12,
                 num_fine=len(fine_codes), num_coarse=len(coarse_groups),
                 stockwell_freq_low=max(1, int(args.freq_bins_low)), stockwell_freq_high=max(2, int(args.freq_bins_high)),
-                swin_freeze_stages=max(0, int(args.swin_freeze_stages))
+                swin_freeze_stages=max(0, int(args.swin_freeze_stages)),
+                swin_magnitude_only=bool(getattr(args, 'swin_magnitude_only', False)),
+                swin_adapt_to_rgb=bool(getattr(args, 'swin_adapt_to_rgb', False)),
             ))
             if _use_v2:
                 model = ECGHybridVariableBeforeBiTransV2(configs, {"feature_dim": 128}).to(device)
@@ -855,7 +859,9 @@ def main():
         mid_channels=64, final_out_channels=128, trans_dim=64, num_heads=4, num_leads=12,
         num_fine=len(fine_codes), num_coarse=len(coarse_groups),
         stockwell_freq_low=max(1, int(args.freq_bins_low)), stockwell_freq_high=max(2, int(args.freq_bins_high)),
-        swin_freeze_stages=max(0, int(args.swin_freeze_stages))
+        swin_freeze_stages=max(0, int(args.swin_freeze_stages)),
+        swin_magnitude_only=bool(getattr(args, 'swin_magnitude_only', False)),
+        swin_adapt_to_rgb=bool(getattr(args, 'swin_adapt_to_rgb', False)),
     ))
     if _use_v2:
         model = ECGHybridVariableBeforeBiTransV2(configs, {"feature_dim": 128}).to(device)

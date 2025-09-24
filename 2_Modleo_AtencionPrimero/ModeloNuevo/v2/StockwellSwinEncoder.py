@@ -21,12 +21,14 @@ class StockwellSwinEncoder(nn.Module):
         freq_bins_high (int): Frecuencia final (exclusiva) para S-transform.
         swin_model_name (str): Modelo Swin pre-entrenado de Hugging Face.
     """
-    def __init__(self, input_dim: int, freq_bins_low: int = 1, freq_bins_high: int = 65, swin_model_name: str = 'microsoft/swin-tiny-patch4-window7-224'):
+    def __init__(self, input_dim: int, freq_bins_low: int = 1, freq_bins_high: int = 65, swin_model_name: str = 'microsoft/swin-tiny-patch4-window7-224', magnitude_only: bool = False, adapt_to_rgb: bool = False):
         super().__init__()
         self.input_dim = input_dim
         self.freq_bins_low = freq_bins_low
         self.freq_bins_high = freq_bins_high
         self.num_freq_bins = freq_bins_high - freq_bins_low
+        self.magnitude_only = bool(magnitude_only)
+        self.adapt_to_rgb = bool(adapt_to_rgb)
         
         # 1. Módulo de la Transformada de Stockwell (implementación real)
         self.stockwell = StockwellTransform(freq_bins_low=self.freq_bins_low, freq_bins_high=self.freq_bins_high)
@@ -38,9 +40,10 @@ class StockwellSwinEncoder(nn.Module):
             # Fallback sin internet ni pesos preentrenados
             config = SwinConfig()
         
-        # El número de canales de entrada para Swin será el doble del `input_dim`,
-        # ya que apilaremos las partes real e imaginaria.
-        self.swin_input_channels = self.input_dim * 2
+        # Determinar canales de entrada esperados por Swin
+        # Si usamos solo magnitud => canales = D; si real+imag => 2*D
+        in_chans_before_adapt = (self.input_dim if self.magnitude_only else self.input_dim * 2)
+        self.swin_input_channels = 3 if self.adapt_to_rgb else in_chans_before_adapt
         config.num_channels = self.swin_input_channels
         
         # La altura y el ancho deben ser divisibles por parche y ventana en todas las etapas.
@@ -57,7 +60,14 @@ class StockwellSwinEncoder(nn.Module):
         except Exception:
             self.temporal_encoder = SwinModel(config)
             print("Usando SwinModel sin pesos preentrenados (fallback). Considera pretrain manual.")
-        print(f"Swin Transformer adaptado para aceptar {self.swin_input_channels} canales (Real + Imaginario).")
+        # Proyector a RGB si se solicita (para aprovechar mejor preentrenamiento en 3 canales)
+        if self.adapt_to_rgb and in_chans_before_adapt != 3:
+            self.rgb_adapter = nn.Conv2d(in_chans_before_adapt, 3, kernel_size=1, bias=False)
+        else:
+            self.rgb_adapter = None
+        mode_str = 'magnitud' if self.magnitude_only else 'real+imag'
+        adapt_str = 'con adaptador a RGB (3 canales)' if self.adapt_to_rgb else 'sin adaptador RGB'
+        print(f"Swin configurado: entrada={mode_str}, canales_entrada={self.swin_input_channels} ({adapt_str}).")
 
     def freeze_stages(self, num_stages: int = 1):
         """Congela las primeras `num_stages` etapas del Swin para regularización/fine-tuning estable."""
@@ -110,12 +120,19 @@ class StockwellSwinEncoder(nn.Module):
         # Entrada: [B, D, T] -> Salida: [B, D, num_freq_bins, T] (complejo)
         x_stockwell = self.stockwell(x)
         
-        # 2. Separar y apilar partes real e imaginaria
-        # Esto crea una "imagen" con el doble de canales, todos reales.
-        x_real = torch.real(x_stockwell)
-        x_imag = torch.imag(x_stockwell)
-        # Forma -> [B, 2*D, num_freq_bins, T]
-        x_image = torch.cat([x_real, x_imag], dim=1)
+        # 2. Construir "imagen" de entrada para Swin
+        if self.magnitude_only:
+            # Usar solo magnitud: reduce mismatch con preentrenamiento de visión
+            x_image = torch.abs(x_stockwell).to(dtype=torch.float32)
+        else:
+            # Separar y apilar partes real e imaginaria -> [B, 2*D, F, T]
+            x_real = torch.real(x_stockwell)
+            x_imag = torch.imag(x_stockwell)
+            x_image = torch.cat([x_real, x_imag], dim=1).to(dtype=torch.float32)
+        
+        # 2b. Adaptar a 3 canales si corresponde
+        if self.rgb_adapter is not None:
+            x_image = self.rgb_adapter(x_image)
         
         # 3. Asegurar que las dimensiones son divisibles por el tamaño del parche
         x_padded = self._pad_to_multiples(x_image, self.temporal_encoder.config)
