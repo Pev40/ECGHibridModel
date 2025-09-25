@@ -16,7 +16,7 @@ class VariableDifferentialAttention(nn.Module):
         )
         self.lambda_diff = nn.Parameter(torch.tensor(0.5))  # Learnable balance
         self.dropout = nn.Dropout(dropout)
-
+        
     def forward(self, x, use_attn=False):
         residual = x
         x_norm = self.norm(x)
