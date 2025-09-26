@@ -1,0 +1,29 @@
+Registro: datos/12Large/WFDBRecords/01/010/JS00001.hea
+
+Top-K etiquetas predichas (fine):
+61721007    p=0.743  true=  pred=●
+270492004   p=0.715  true=  pred=●
+164934002   p=0.692  true=✓ pred=●
+251146004   p=0.675  true=  pred=●
+698252002   p=0.660  true=  pred=●
+429622005   p=0.638  true=  pred=●
+426783006   p=0.630  true=  pred=●
+426177001   p=0.621  true=  pred=●
+55930002    p=0.607  true=  pred=●
+55827005    p=0.603  true=  pred=●
+164873001   p=0.593  true=  pred=●
+427393009   p=0.568  true=  pred=●
+47665007    p=0.519  true=  pred=●
+427084000   p=0.507  true=  pred=●
+59931005    p=0.487  true=  pred= 
+
+Etiquetas verdaderas (fine): 164934002, 164889003, 59118001
+
+Probabilidades coarse:
+  other       : 0.597
+  rhythm      : 0.555
+  hypertrophy : 0.488
+  axis_rotation_voltage: 0.436
+  st_t_ischemia_mi: 0.387
+  ectopy      : 0.374
+  conduction  : 0.354

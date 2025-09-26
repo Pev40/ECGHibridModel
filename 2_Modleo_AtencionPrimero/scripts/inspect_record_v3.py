@@ -1,6 +1,7 @@
 import os
 import json
 import argparse
+import csv
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
@@ -114,11 +115,98 @@ def inspect_one(sample, model, device, fine_codes, coarse_names, threshold=0.5, 
         'p_fine': p_fine,
         'p_coarse': p_coarse,
         'attn': attn,
+        'patient_id': sample.get('patient_id')
     }
 
 
+def _multilabel_prf(y_true_vec, y_prob_vec, thr):
+    y_true_b = (y_true_vec >= 0.5).astype(np.int32)
+    y_pred_b = (y_prob_vec >= float(thr)).astype(np.int32)
+    tp = int(np.sum((y_true_b == 1) & (y_pred_b == 1)))
+    fp = int(np.sum((y_true_b == 0) & (y_pred_b == 1)))
+    fn = int(np.sum((y_true_b == 1) & (y_pred_b == 0)))
+    prec = (tp / (tp + fp)) if (tp + fp) > 0 else 0.0
+    rec = (tp / (tp + fn)) if (tp + fn) > 0 else 0.0
+    f1 = (2 * prec * rec / (prec + rec)) if (prec + rec) > 0 else 0.0
+    return tp, fp, fn, prec, rec, f1
+
+
+def _hit_at_k(y_true_vec, y_prob_vec, k):
+    y_true_pos = set(np.where(y_true_vec >= 0.5)[0].tolist())
+    order = np.argsort(-y_prob_vec)
+    topk = order[:int(k)]
+    hits = len([i for i in topk if i in y_true_pos])
+    any_hit = 1 if hits > 0 else 0
+    denom = max(1, len(y_true_pos))
+    recall_at_k = hits / denom
+    return hits, any_hit, recall_at_k
+
+
+def compute_saliency(sample, model, device, coarse_dim, fine_topk=1, prefer_true=True):
+    x = sample['samples'].unsqueeze(0).to(device)
+    x.requires_grad_(True)
+    y_fine = sample.get('labels_fine')
+    y_coarse = sample.get('labels_coarse')
+
+    b = x.size(0)
+    wide_feats = torch.zeros(b, 3, device=device, dtype=x.dtype)
+    if y_coarse is not None:
+        snomed_embed = y_coarse.unsqueeze(0).to(device)
+    else:
+        snomed_embed = torch.zeros(b, int(coarse_dim), device=device, dtype=x.dtype)
+
+    model.zero_grad(set_to_none=True)
+    logits_coarse, logits_fine, _ = model(x, wide_feats, snomed_embed, use_attn=False)
+
+    # Selección de objetivo: etiquetas verdaderas si existen, si no top-k predichas
+    target = None
+    if prefer_true and (y_fine is not None) and (y_fine.sum().item() > 0):
+        pos_idx = torch.nonzero(y_fine >= 0.5, as_tuple=False).view(-1)
+        target = logits_fine[0, pos_idx].sum()
+    else:
+        probs = torch.sigmoid(logits_fine[0])
+        topk = torch.topk(probs, k=max(1, int(fine_topk)))
+        target = logits_fine[0, topk.indices].sum()
+
+    target.backward()
+    grad = x.grad.detach().abs().squeeze(0)  # [12, T]
+    grad_np = grad.cpu().numpy()
+    # Saliency temporal: promedio sobre leads
+    sal_time = grad_np.mean(axis=0)
+    if sal_time.max() > 0:
+        sal_time = sal_time / (sal_time.max() + 1e-8)
+    return grad_np, sal_time
+
+
+def plot_temporal_saliency(sal_time, title, save_path):
+    plt.figure(figsize=(12, 3))
+    plt.plot(sal_time, color='crimson', lw=1.0)
+    plt.ylim(0, 1.05)
+    plt.title(title)
+    plt.grid(True, ls='--', lw=0.4)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+    return save_path
+
+
+def plot_lead_time_heatmap(grad_abs, title, save_path):
+    # grad_abs: [12, T]
+    import seaborn as sns
+    plt.figure(figsize=(12, 4))
+    vmax = float(np.percentile(grad_abs, 99.0)) if np.isfinite(grad_abs).all() else None
+    sns.heatmap(grad_abs, cmap='magma', cbar=True, vmin=0.0, vmax=vmax)
+    plt.xlabel('Tiempo')
+    plt.ylabel('Lead')
+    plt.title(title)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+    return save_path
+
+
 def main():
-    parser = argparse.ArgumentParser(description='Inspección de un registro ECG: etiquetas reales vs predichas (v3)')
+    parser = argparse.ArgumentParser(description='Inspección de registro(s) ECG: etiquetas reales vs predichas (v3)')
     parser.add_argument('--sequence_len', type=int, default=5000)
     parser.add_argument('--target_fs', type=float, default=500.0)
     parser.add_argument('--bandpass_low', type=float, default=0.5)
@@ -129,12 +217,16 @@ def main():
     parser.add_argument('--cache_dir', type=str, default=os.path.join('datos','pt_cache'))
     parser.add_argument('--ckpt', type=str, default=os.path.join('experiments_logs','full_run_v3','ckpt_best.pt'))
     parser.add_argument('--index', type=int, default=0, help='Índice del dataset a inspeccionar')
+    parser.add_argument('--indices', type=str, default='', help='Lista de índices separada por comas (ej: 0,5,12)')
+    parser.add_argument('--num', type=int, default=1, help='Cantidad de ejemplos a inspeccionar')
+    parser.add_argument('--random', action='store_true', help='Seleccionar índices al azar')
     parser.add_argument('--hea_path', type=str, default='', help='Ruta .hea específica (opcional)')
     parser.add_argument('--save_dir', type=str, default='inspeccion_v3')
     parser.add_argument('--topk', type=int, default=15)
     parser.add_argument('--threshold', type=float, default=0.5)
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
     parser.add_argument('--use_attn', action='store_true')
+    parser.add_argument('--viz_saliency', action='store_true', help='Calcular y guardar saliency maps por muestra')
     args = parser.parse_args()
 
     os.makedirs(args.save_dir, exist_ok=True)
@@ -157,63 +249,113 @@ def main():
         eval_mode=True,
     )
 
-    # Selección por .hea específico si se indicó
-    sample = None
+    # Determinar índices a evaluar
+    indices = []
     if args.hea_path:
-        # buscar índice del registro
+        # buscar índice del registro específico
         idx_match = None
         for i in range(len(ds)):
             rec = ds[i]
             if rec.get('hea') == args.hea_path:
                 idx_match = i
-                sample = rec
                 break
         if idx_match is None:
             raise FileNotFoundError(f'No se encontró el registro con hea={args.hea_path} en el dataset.')
-        idx = idx_match
+        indices = [idx_match]
+    elif args.indices:
+        try:
+            indices = [max(0, min(int(s.strip()), len(ds)-1)) for s in args.indices.split(',') if s.strip() != '']
+        except Exception:
+            raise ValueError('No se pudo parsear --indices. Usa formato 0,5,12')
     else:
-        idx = max(0, min(int(args.index), len(ds) - 1))
-        sample = ds[idx]
+        if args.num <= 1:
+            indices = [max(0, min(int(args.index), len(ds) - 1))]
+        else:
+            all_idxs = list(range(len(ds)))
+            if args.random:
+                rng = np.random.default_rng()
+                rng.shuffle(all_idxs)
+            indices = all_idxs[:int(args.num)]
 
     device = torch.device(args.device)
     model = build_model(num_coarse=len(coarse_names), num_fine=len(fine_codes), device=device)
     model = load_checkpoint(model, args.ckpt, device)
 
-    out = inspect_one(sample, model, device, fine_codes, coarse_names, threshold=args.threshold, use_attn=args.use_attn)
+    # CSV de métricas por muestra
+    csv_path = os.path.join(args.save_dir, 'inspection_metrics.csv')
+    write_header = not os.path.exists(csv_path)
+    with open(csv_path, 'a', newline='', encoding='utf-8') as cf:
+        writer = csv.writer(cf)
+        if write_header:
+            writer.writerow([
+                'record', 'patient_id',
+                'fine_tp', 'fine_fp', 'fine_fn', 'fine_precision', 'fine_recall', 'fine_f1',
+                'fine_hits_at_k', 'fine_any_hit_topk', 'fine_recall_at_k',
+                'coarse_tp', 'coarse_fp', 'coarse_fn', 'coarse_precision', 'coarse_recall', 'coarse_f1',
+                'coarse_hits_at_k', 'coarse_any_hit_topk', 'coarse_recall_at_k'
+            ])
 
-    # Plot ECG
-    base = os.path.splitext(os.path.basename(out['hea']))[0] if out['hea'] else f'idx_{idx}'
-    fig_path = os.path.join(args.save_dir, f'{base}_ecg.png')
-    plot_ecg_12leads(out['x'], title=f'ECG {base}', save_path=fig_path)
+        for idx in indices:
+            sample = ds[idx]
+            out = inspect_one(sample, model, device, fine_codes, coarse_names, threshold=args.threshold, use_attn=args.use_attn)
 
-    # Guardar resumen de etiquetas reales vs predichas (top-k)
-    txt_lines = []
-    txt_lines.append(f'Registro: {out["hea"]}')
-    txt_lines.append('')
-    txt_lines.append('Top-K etiquetas predichas (fine):')
-    txt_lines.append(format_topk_labels(out['y_fine'] if out['y_fine'] is not None else np.zeros_like(out['p_fine']),
-                                        out['p_fine'], fine_codes, k=args.topk, thr=args.threshold))
-    txt_lines.append('')
-    if out['y_fine'] is not None:
-        true_idxs = np.where(out['y_fine'] >= 0.5)[0].tolist()
-        txt_lines.append('Etiquetas verdaderas (fine): ' + ', '.join(fine_codes[i] for i in true_idxs))
-    txt_lines.append('')
-    txt_lines.append('Probabilidades coarse:')
-    coarse_pairs = [(coarse_names[i], float(out['p_coarse'][i])) for i in range(len(coarse_names))]
-    coarse_pairs.sort(key=lambda t: t[1], reverse=True)
-    for name, p in coarse_pairs:
-        txt_lines.append(f'  {name:<12}: {p:0.3f}')
+            # Guardar ECG y TXT por muestra
+            base = os.path.splitext(os.path.basename(out['hea']))[0] if out['hea'] else f'idx_{idx}'
+            fig_path = os.path.join(args.save_dir, f'{base}_ecg.png')
+            plot_ecg_12leads(out['x'], title=f'ECG {base}', save_path=fig_path)
 
-    if args.use_attn and out['attn'] is not None:
-        txt_lines.append('')
-        txt_lines.append('[Info] Pesos de atención disponibles (no visualizados aún).')
+            txt_lines = []
+            txt_lines.append(f'Registro: {out["hea"]}')
+            txt_lines.append('')
+            txt_lines.append('Top-K etiquetas predichas (fine):')
+            txt_lines.append(format_topk_labels(out['y_fine'] if out['y_fine'] is not None else np.zeros_like(out['p_fine']),
+                                                out['p_fine'], fine_codes, k=args.topk, thr=args.threshold))
+            txt_lines.append('')
+            if out['y_fine'] is not None:
+                true_idxs = np.where(out['y_fine'] >= 0.5)[0].tolist()
+                txt_lines.append('Etiquetas verdaderas (fine): ' + ', '.join(fine_codes[i] for i in true_idxs))
+            txt_lines.append('')
+            txt_lines.append('Probabilidades coarse:')
+            coarse_pairs = [(coarse_names[i], float(out['p_coarse'][i])) for i in range(len(coarse_names))]
+            coarse_pairs.sort(key=lambda t: t[1], reverse=True)
+            for name, p in coarse_pairs:
+                txt_lines.append(f'  {name:<12}: {p:0.3f}')
+            if args.use_attn and out['attn'] is not None:
+                txt_lines.append('')
+                txt_lines.append('[Info] Pesos de atención disponibles (no visualizados aún).')
+            txt_path = os.path.join(args.save_dir, f'{base}_predicciones.txt')
+            with open(txt_path, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(txt_lines))
 
-    txt_path = os.path.join(args.save_dir, f'{base}_predicciones.txt')
-    with open(txt_path, 'w', encoding='utf-8') as f:
-        f.write('\n'.join(txt_lines))
+            # Visualizaciones de atención (placeholder) y saliency
+            if args.viz_saliency:
+                grad_abs, sal_time = compute_saliency(sample, model, device, coarse_dim=len(coarse_names), fine_topk=max(1, int(min(args.topk, len(fine_codes)))))
+                sal_t_path = os.path.join(args.save_dir, f'{base}_saliency_time.png')
+                heat_path = os.path.join(args.save_dir, f'{base}_saliency_heatmap.png')
+                plot_temporal_saliency(sal_time, title=f'Saliency temporal {base}', save_path=sal_t_path)
+                plot_lead_time_heatmap(grad_abs, title=f'Saliency por lead y tiempo {base}', save_path=heat_path)
 
-    print('Figura guardada en:', fig_path)
-    print('Resumen guardado en:', txt_path)
+            # Métricas por muestra
+            y_fine = out['y_fine'] if out['y_fine'] is not None else np.zeros_like(out['p_fine'])
+            y_coarse = out['y_coarse'] if out['y_coarse'] is not None else np.zeros_like(out['p_coarse'])
+            p_fine = out['p_fine']
+            p_coarse = out['p_coarse']
+
+            f_tp, f_fp, f_fn, f_prec, f_rec, f_f1 = _multilabel_prf(y_fine, p_fine, args.threshold)
+            f_hits, f_any_hit, f_rk = _hit_at_k(y_fine, p_fine, args.topk)
+            c_tp, c_fp, c_fn, c_prec, c_rec, c_f1 = _multilabel_prf(y_coarse, p_coarse, args.threshold)
+            c_hits, c_any_hit, c_rk = _hit_at_k(y_coarse, p_coarse, args.topk)
+
+            writer.writerow([
+                base, out.get('patient_id'),
+                f_tp, f_fp, f_fn, f_prec, f_rec, f_f1,
+                f_hits, f_any_hit, f_rk,
+                c_tp, c_fp, c_fn, c_prec, c_rec, c_f1,
+                c_hits, c_any_hit, c_rk
+            ])
+
+            print(f"Guardado: {fig_path} | {txt_path}")
+    print('CSV de métricas por muestra:', csv_path)
 
 
 if __name__ == '__main__':
