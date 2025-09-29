@@ -93,8 +93,10 @@ class HMST(nn.Module):
         coarse_logits = self.head_coarse(cls_out)
         fine_logits = self.head_fine(cls_out)
         return coarse_logits, fine_logits, (attn_weights if use_attn else None)
-
+       # pred_coarse_from_fine = torch.matmul(fine_pred_probs, self.hier_matrix)
     def consistency_loss(self, coarse_pred_probs, fine_pred_probs):
         # Penaliza: fine @ hier_matrix ≈ coarse (en espacio de probabilidades)
-        pred_coarse_from_fine = torch.matmul(fine_pred_probs, self.hier_matrix)
+        # Regularización: restringir hier_matrix a valores positivos mediante softplus
+        hier_pos = torch.nn.functional.softplus(self.hier_matrix)
+        pred_coarse_from_fine = torch.matmul(fine_pred_probs, hier_pos)
         return F.mse_loss(pred_coarse_from_fine, coarse_pred_probs)

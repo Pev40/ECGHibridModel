@@ -30,6 +30,11 @@ def evaluate_hierarchical(
     threshold=0.5,
     thresholds_coarse=None,
     thresholds_fine=None,
+    return_arrays=False,
+    loss_mode='bce',  # 'bce', 'focal', 'bce_posw'
+    focal_alpha=0.25,
+    focal_gamma=2.0,
+    pos_weight=None,
 ):
     """
     Evalúa el modelo HMST con métricas desglosadas por cabezal (coarse/fine),
@@ -79,9 +84,26 @@ def evaluate_hierarchical(
             coarse_pred = torch.sigmoid(coarse_logits)
             fine_pred = torch.sigmoid(fine_logits)
 
-            # Loss (si necesitas): BCE con logits + consistencia en probas
-            bce_c = F.binary_cross_entropy_with_logits(coarse_logits, coarse_gt)
-            bce_f = F.binary_cross_entropy_with_logits(fine_logits, fine_gt)
+            # Loss (si necesitas): configurable
+            if loss_mode == 'focal':
+                def _focal_loss(logits, targets, alpha=focal_alpha, gamma=focal_gamma):
+                    p = torch.sigmoid(logits)
+                    ce = F.binary_cross_entropy_with_logits(logits, targets, reduction='none')
+                    p_t = p * targets + (1 - p) * (1 - targets)
+                    alpha_t = alpha * targets + (1 - alpha) * (1 - targets)
+                    loss = alpha_t * (1 - p_t) ** gamma * ce
+                    return loss.mean()
+                bce_c = _focal_loss(coarse_logits, coarse_gt)
+                bce_f = _focal_loss(fine_logits, fine_gt)
+            elif loss_mode == 'bce_posw' and pos_weight is not None:
+                pw = torch.as_tensor(pos_weight, device=device, dtype=coarse_gt.dtype)
+                pw_c = pw[:num_coarse] if pw.numel() >= num_coarse else None
+                pw_f = pw[num_coarse:num_coarse+num_fine] if pw.numel() >= num_coarse+num_fine else None
+                bce_c = F.binary_cross_entropy_with_logits(coarse_logits, coarse_gt, pos_weight=pw_c)
+                bce_f = F.binary_cross_entropy_with_logits(fine_logits, fine_gt, pos_weight=pw_f)
+            else:
+                bce_c = F.binary_cross_entropy_with_logits(coarse_logits, coarse_gt)
+                bce_f = F.binary_cross_entropy_with_logits(fine_logits, fine_gt)
             cons = model.consistency_loss(coarse_pred, fine_pred)
             batch_loss = bce_c + bce_f + 0.1 * cons
             total_loss += batch_loss.item()
@@ -171,6 +193,11 @@ def evaluate_hierarchical(
         'thresholds_coarse': thr_coarse.tolist(),
         'thresholds_fine': thr_fine.tolist(),
     }
+    if return_arrays:
+        results['y_true_fine'] = fine_gt
+        results['y_prob_fine'] = fine_pred
+        results['y_true_coarse'] = coarse_gt
+        results['y_prob_coarse'] = coarse_pred
     
     # Logging opcional
     if wandb.run is not None:
@@ -552,6 +579,8 @@ if __name__ == '__main__':
                             num_coarse=num_coarse,
                             num_fine=num_fine,
                             device=dev_try,
+                            return_arrays=True,
+                            loss_mode='bce',  # puedes alternar: 'focal', 'bce_posw'
                         )
                         _log(f"Evaluación completada en {time.time()-t_eval:.1f}s en device={dev_try} bs={bs}")
                         success = True
@@ -576,6 +605,43 @@ if __name__ == '__main__':
             else:
                 print('Métricas Coarse:', metrics['coarse'])
                 print('Métricas Fine:', metrics['fine'])
+                # Optimización de thresholds por clase para fine usando validación de F1
+                try:
+                    import numpy as _np
+                    from sklearn.metrics import f1_score as _f1
+                    y_true = metrics.get('y_true_fine')
+                    y_prob = metrics.get('y_prob_fine')
+                    if y_true is not None and y_prob is not None:
+                        c = y_true.shape[1]
+                        best_thr = _np.full((c,), 0.5, dtype=_np.float32)
+                        for i in range(c):
+                            yi = y_true[:, i]
+                            pi = y_prob[:, i]
+                            if yi.sum() == 0:
+                                continue
+                            best_f1 = -1.0
+                            best_t = 0.5
+                            for t in _np.linspace(0.05, 0.95, 19):
+                                f1i = _f1(yi, (pi >= t).astype(_np.int32), zero_division=0)
+                                if f1i > best_f1:
+                                    best_f1 = f1i
+                                    best_t = t
+                            best_thr[i] = best_t
+                        _log(f"Umbrales por clase optimizados (ejemplo 10 primeras): {best_thr[:10].round(3).tolist()}")
+                        # Recalcular F1 macro con thresholds óptimos
+                        y_pred_opt = (y_prob >= best_thr[None, :]).astype(_np.int32)
+                        f1s = []
+                        for i in range(c):
+                            yi = y_true[:, i]
+                            if yi.sum() == 0:
+                                f1s.append(_np.nan)
+                            else:
+                                f1s.append(_f1(yi, y_pred_opt[:, i], zero_division=0))
+                        import numpy as np
+                        f1_macro_opt = float(np.nanmean(np.array(f1s, dtype=float)))
+                        print(f"F1_macro (umbrales optimizados): {f1_macro_opt:.4f}")
+                except Exception as eopt:
+                    _log(f"Opt de thresholds por clase falló: {eopt}")
         except Exception as e:
             _log(f"No se pudo construir test_dl automáticamente: {e}")
             _log('Define test_dl manualmente o ajusta las rutas de datos antes de evaluar.')
