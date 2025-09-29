@@ -18,6 +18,7 @@ Inputs:
  - --n_examples : numero de ejemplos cualitativos
 """
 import os, json, argparse, math
+import sys
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -32,6 +33,10 @@ import torch
 from torch.utils.data import DataLoader
 
 # Importar clases del proyecto para cómputo en vivo si faltan preds
+PROJ_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if PROJ_ROOT not in sys.path:
+    sys.path.insert(0, PROJ_ROOT)
+
 try:
     from ModeloNuevo.v3.HierarchicalMultiScaleTransformer import HMST
     from datasets.ecg12large import ECG12Large, extract_patient_id
