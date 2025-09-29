@@ -1,5 +1,16 @@
 import os
+import sys
+import time
+# Asegura que el directorio raíz del proyecto esté en sys.path para importar paquetes hermanos
+PROJ_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if PROJ_ROOT not in sys.path:
+    sys.path.insert(0, PROJ_ROOT)
 from ModeloNuevo.v3.HierarchicalMultiScaleTransformer import HMST
+from datasets.ecg12large import ECG12Large, extract_patient_id
+
+
+def _log(msg):
+    print(f"[resultadoPaper] {msg}", flush=True)
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -42,14 +53,25 @@ def evaluate_hierarchical(
     total_loss = 0.0
     num_batches = 0
     
+    start_eval = time.time()
     with torch.no_grad():
-        for batch in dataloader:
+        try:
+            total_batches = len(dataloader)
+        except Exception:
+            total_batches = None
+        t0 = time.time()
+        for bi, batch in enumerate(dataloader, start=1):
             x = batch['samples'].to(device)  # [B,12,T]
-            wide = batch['wide_feats'].to(device)  # [B,3]
-            snomed = batch['snomed_embed'].to(device)  # [B,10]
+            # Campos opcionales: usar None -> el modelo construye zeros internos
+            wide = batch.get('wide_feats', None)
+            if wide is not None:
+                wide = wide.to(device)
+            snomed = batch.get('snomed_embed', None)
+            if snomed is not None:
+                snomed = snomed.to(device)
             coarse_gt = batch['labels_coarse'].to(device)  # [B,num_coarse]
             fine_gt = batch['labels_fine'].to(device)  # [B,num_fine]
-            
+
             # Forward: logits
             coarse_logits, fine_logits, attn_w = model(x, wide, snomed, use_attn=use_attn)
 
@@ -72,6 +94,9 @@ def evaluate_hierarchical(
             all_fine_pred.append(fine_pred.cpu().numpy())
             if use_attn:
                 all_attn_weights.append(attn_w)  # List of lists [stage, weights]
+            # Log de progreso
+            if total_batches is not None and (bi % max(1, total_batches // 20) == 0 or bi == total_batches):
+                _log(f"Eval batch {bi}/{total_batches} (tiempo acumulado {time.time()-t0:.1f}s)")
     
     # Stack
     coarse_gt = np.vstack(all_coarse_gt)
@@ -133,6 +158,7 @@ def evaluate_hierarchical(
     }
     
     avg_loss = total_loss / num_batches if num_batches > 0 else 0
+    _log(f"Evaluación finalizada en {time.time()-start_eval:.1f}s. Pérdida promedio: {avg_loss:.4f}")
     
     results = {
         'loss': avg_loss,
@@ -319,12 +345,16 @@ def qualitative_analysis(
     print(f"Viz guardada en {save_dir}: {num_samples} samples con plots, tablas y heatmaps.")
 
 def _find_latest_checkpoint(exp_root):
-    """Busca el checkpoint más reciente en exp_root. Prioriza 'ckpt_best.pt'."""
+    """Acepta carpeta o archivo. Si es archivo .pt, lo usa; si es carpeta, busca el más reciente priorizando 'ckpt_best.pt'."""
+    # Si es ruta a archivo, úsalo directamente
+    if os.path.isfile(exp_root):
+        return exp_root if exp_root.lower().endswith('.pt') else None
+
     best_candidates = []
     any_candidates = []
     for dirpath, _, filenames in os.walk(exp_root):
         for fn in filenames:
-            if fn.endswith('.pt'):
+            if fn.lower().endswith('.pt'):
                 fp = os.path.join(dirpath, fn)
                 try:
                     mtime = os.path.getmtime(fp)
@@ -343,10 +373,55 @@ def _find_latest_checkpoint(exp_root):
     return None
 
 
+def _infer_hmst_config_from_state(state_dict):
+    """Infiera parámetros de HMST a partir del state_dict del checkpoint."""
+    cfg = {}
+    
+    def _get_tensor(keys):
+        for k in keys:
+            v = state_dict.get(k, None)
+            if isinstance(v, torch.Tensor):
+                return v
+        return None
+    # d_model e input_channels desde input_proj
+    w = _get_tensor(['input_proj.weight'])
+    if isinstance(w, torch.Tensor):
+        cfg['d_model'] = int(w.shape[0])
+        cfg['input_channels'] = int(w.shape[1])
+    # Alternativa: cls_token
+    ct = _get_tensor(['cls_token'])
+    if isinstance(ct, torch.Tensor):
+        cfg['d_model'] = int(ct.shape[-1])
+    # num_stages: cuenta etapas conv
+    stage_idxs = []
+    for k in state_dict.keys():
+        if k.startswith('conv_stages.'):
+            try:
+                idx = int(k.split('.')[1])
+                stage_idxs.append(idx)
+            except Exception:
+                pass
+    if stage_idxs:
+        cfg['num_stages'] = max(stage_idxs) + 1
+    # num_coarse/num_fine desde cabezales
+    hc = _get_tensor(['head_coarse.1.weight', 'head_coarse.weight'])
+    if isinstance(hc, torch.Tensor):
+        cfg['num_coarse'] = int(hc.shape[0])
+    hf = _get_tensor(['head_fine.1.weight', 'head_fine.weight'])
+    if isinstance(hf, torch.Tensor):
+        cfg['num_fine'] = int(hf.shape[0])
+    # snomed_dim
+    sp = _get_tensor(['snomed_proj.weight'])
+    if isinstance(sp, torch.Tensor):
+        cfg['snomed_dim'] = int(sp.shape[1])
+    return cfg
+
+
 if __name__ == '__main__':
     # Ruta base de experiments_logs relativa a este archivo
-    proj_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-    exp_root = os.path.join(proj_root, 'experiments_logs')
+    proj_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', ))
+    exp_root = os.path.join(proj_root, 'experiments_logs',"multi_run_v3_20250926_003016","seed_789","ckpt_best.pt")
+    print(exp_root)
     ckpt_path = _find_latest_checkpoint(exp_root)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -354,22 +429,153 @@ if __name__ == '__main__':
         print('No se encontró ningún checkpoint en', exp_root)
     else:
         print('Usando checkpoint:', ckpt_path)
-        # Instancia modelo y carga state_dict
-        model = HMST().to(device)
-        state = torch.load(ckpt_path, map_location=device)
-        # Soporta tanto dict plano como {'state_dict': ...}
-        state_dict = state.get('state_dict', state)
+        _log('Cargando checkpoint...')
+        # Carga segura del checkpoint (evita objetos pickle no confiables si es posible)
+        try:
+            state = torch.load(ckpt_path, map_location=device, weights_only=True)
+        except TypeError:
+            state = torch.load(ckpt_path, map_location=device)
+        _log('Detectando formato del checkpoint...')
+        # Detecta layout del checkpoint: {'model': ...} o {'state_dict': ...} o dict plano
+        if isinstance(state, dict) and 'model' in state and isinstance(state['model'], dict):
+            state_dict = state['model']
+        elif isinstance(state, dict) and 'state_dict' in state and isinstance(state['state_dict'], dict):
+            state_dict = state['state_dict']
+        else:
+            state_dict = state
+        _log('Infiriendo configuración del modelo a partir del checkpoint...')
+        # Inferir config para instanciar HMST compatible con el checkpoint
+        inferred = _infer_hmst_config_from_state(state_dict)
+        _log(f"Config inferida: {inferred}")
+        _log('Instanciando HMST con la configuración inferida...')
+        model = HMST(
+            input_channels=inferred.get('input_channels', 12 + 3),
+            d_model=inferred.get('d_model', 512),
+            num_stages=inferred.get('num_stages', 3),
+            num_coarse=inferred.get('num_coarse', 10),
+            num_fine=inferred.get('num_fine', 27),
+            snomed_dim=inferred.get('snomed_dim', 10),
+        ).to(device)
+        _log('Cargando pesos del checkpoint en el modelo...')
         missing, unexpected = model.load_state_dict(state_dict, strict=False)
         if missing:
-            print('Advertencia: pesos faltantes:', missing)
+            _log(f"Advertencia: pesos faltantes: {len(missing)} elementos")
         if unexpected:
-            print('Advertencia: pesos inesperados:', unexpected)
+            _log(f"Advertencia: pesos inesperados: {len(unexpected)} elementos")
 
-        # Ejecuta evaluación sólo si test_dl está presente en el entorno
-        if 'test_dl' in globals() and globals()['test_dl'] is not None:
-            metrics = evaluate_hierarchical(model, globals()['test_dl'], num_coarse=model.head_coarse[-1].out_features,
-                                            num_fine=model.head_fine[-1].out_features, device=device)
-            print('Métricas Coarse:', metrics['coarse'])
-            print('Métricas Fine:', metrics['fine'])
-        else:
-            print('test_dl no está definido. Proporciona un DataLoader de test para evaluar.')
+        # Construir test_dl replicando la lógica de train_full_v3 (12Large por defecto)
+        try:
+            _log('Cargando jerarquía de etiquetas...')
+            # Cargar jerarquía para num_fine/num_coarse y embeddings
+            hierarchy_path = os.path.join('datos', '12Large', 'labels_hierarchy.json')
+            if not os.path.exists(hierarchy_path):
+                raise FileNotFoundError(f'Falta {hierarchy_path}. Genera la jerarquía antes de evaluar.')
+            import json as _json
+            with open(hierarchy_path, 'r', encoding='utf-8') as _f:
+                _hier = _json.load(_f)
+            fine_codes = _hier['fine_codes']
+            coarse_groups = _hier['coarse_groups']
+            num_fine = len(fine_codes)
+            num_coarse = len(coarse_groups)
+            _log(f"Jerarquía: num_fine={num_fine}, num_coarse={num_coarse}")
+
+            _log('Enumerando archivos HEA y construyendo split de test por paciente...')
+            # Construir lista de archivos de test por paciente
+            from glob import glob as _glob
+            root = os.path.join('datos', '12Large', 'WFDBRecords')
+            hea_files = _glob(os.path.join(root, '**', '*.hea'), recursive=True)
+            pairs = [(hea, os.path.splitext(hea)[0] + '.mat') for hea in hea_files]
+            files = [hea for hea, mat in pairs if os.path.exists(mat)]
+            _log(f"HEA encontrados: {len(hea_files)} | con .mat: {len(files)}")
+            pid_to_files = {}
+            for hea in files:
+                pid = extract_patient_id(hea, root)
+                pid_to_files.setdefault(pid, []).append(hea)
+            import numpy as _np
+            rng = _np.random.default_rng(42)
+            pids = list(pid_to_files.keys())
+            rng.shuffle(pids)
+            n = len(pids)
+            n_tr = int(0.7 * n)
+            n_va = int(0.15 * n)
+            te_pids = set(pids[n_tr+n_va:])
+            te_files = []
+            for pid, flist in pid_to_files.items():
+                if pid in te_pids:
+                    te_files.extend(flist)
+            _log(f"Pacientes totales: {n} | test: {len(te_pids)} | archivos test: {len(te_files)}")
+
+            _log('Construyendo dataset de test (esto puede tardar)...')
+            t_ds = time.time()
+            # Dataset de test
+            te_ds = ECG12Large(root, sequence_len=5000, files=te_files, multilabel=True,
+                               hierarchy_path=hierarchy_path, cache_dir=os.path.join('datos', 'pt_cache'),
+                               random_crop=False, target_fs=500.0, bandpass_hz=(0.5,45.0), notch_hz=None, eval_mode=True)
+            _log(f"Dataset test listo en {time.time()-t_ds:.1f}s | muestras: {len(te_ds)}")
+            from torch.utils.data import DataLoader as _DataLoader
+            
+            def _build_dl(bs, workers, pin):
+                return _DataLoader(
+                    te_ds,
+                    batch_size=int(bs),
+                    shuffle=False,
+                    num_workers=int(workers),
+                    pin_memory=bool(pin),
+                    persistent_workers=(int(workers) > 0),
+                    prefetch_factor=(2 if int(workers) > 0 else None),
+                )
+
+            # Intentos con distintos batch sizes y dispositivo
+            tried = []
+            success = False
+            metrics = None
+            devices_try = [device] + (['cpu'] if device == 'cuda' else [])
+            for dev_try in devices_try:
+                if dev_try == 'cuda' and not torch.cuda.is_available():
+                    continue
+                # Mover modelo al dispositivo de intento
+                if next(model.parameters()).device.type != dev_try:
+                    _log(f"Moviendo modelo a {dev_try}...")
+                    model = model.to(dev_try)
+                bs_candidates = [64, 32, 16, 8, 4] if dev_try == 'cuda' else [8, 4, 2, 1]
+                for bs in bs_candidates:
+                    try:
+                        pin = (dev_try == 'cuda')
+                        workers = 0  # más estable en Windows para inferencia
+                        test_dl = _build_dl(bs, workers, pin)
+                        _log(f"DataLoader test creado | device={dev_try} | bs={bs} | batches={len(test_dl)} | workers={workers}")
+                        _log('Iniciando evaluación...')
+                        t_eval = time.time()
+                        metrics = evaluate_hierarchical(
+                            model,
+                            test_dl,
+                            num_coarse=num_coarse,
+                            num_fine=num_fine,
+                            device=dev_try,
+                        )
+                        _log(f"Evaluación completada en {time.time()-t_eval:.1f}s en device={dev_try} bs={bs}")
+                        success = True
+                        break
+                    except RuntimeError as re:
+                        tried.append((dev_try, bs, str(re).split('\n')[0]))
+                        _log(f"Fallo en device={dev_try} bs={bs}: {re}")
+                        if dev_try == 'cuda':
+                            try:
+                                torch.cuda.empty_cache()
+                            except Exception:
+                                pass
+                        continue
+                    except Exception as e2:
+                        tried.append((dev_try, bs, str(e2).split('\n')[0]))
+                        _log(f"Error en device={dev_try} bs={bs}: {e2}")
+                        continue
+                if success:
+                    break
+            if not success:
+                _log(f"No se pudo evaluar tras intentos: {tried}")
+            else:
+                print('Métricas Coarse:', metrics['coarse'])
+                print('Métricas Fine:', metrics['fine'])
+        except Exception as e:
+            _log(f"No se pudo construir test_dl automáticamente: {e}")
+            _log('Define test_dl manualmente o ajusta las rutas de datos antes de evaluar.')

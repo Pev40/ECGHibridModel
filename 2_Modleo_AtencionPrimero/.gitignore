@@ -9,4 +9,6 @@
 /vast6000
 /vast6000.pub
 Resultado/
-experiments_logs/
+experiments_logs/full_run_v3_20250925_184035/
+experiments_logs/multi_run_v3_20250926_003016/seed_123/
+experiments_logs/multi_run_v3_20250926_003016/seed_456/
