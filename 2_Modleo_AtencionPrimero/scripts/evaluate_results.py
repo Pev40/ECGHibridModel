@@ -296,6 +296,65 @@ def plot_evolution_val_auprc(run_dirs, out_path):
     plt.close()
 
 
+def _slope(x, y):
+    try:
+        x = np.asarray(x, dtype=float)
+        y = np.asarray(y, dtype=float)
+        if len(x) >= 2 and len(y) >= 2:
+            m, _ = np.polyfit(x, y, 1)
+            return float(m)
+    except Exception:
+        pass
+    return float('nan')
+
+
+def compute_overfit_indicators(run_dir, tail_epochs=5):
+    import pandas as pd
+    csv_path = os.path.join(run_dir, 'train_log.csv')
+    if not os.path.exists(csv_path):
+        return None
+    df = pd.read_csv(csv_path)
+    for col in ['epoch', 'train_loss', 'val_loss', 'val_auroc_macro']:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    # métricas básicas
+    train_end = float(df['train_loss'].iloc[-1]) if 'train_loss' in df.columns else float('nan')
+    val_end = float(df['val_loss'].iloc[-1]) if 'val_loss' in df.columns else float('nan')
+    gap_end = val_end - train_end if (np.isfinite(val_end) and np.isfinite(train_end)) else float('nan')
+    # mejor validación
+    if 'val_loss' in df.columns:
+        idx_best = int(df['val_loss'].idxmin())
+        best_epoch = int(df['epoch'].iloc[idx_best]) if 'epoch' in df.columns else (idx_best + 1)
+        best_val = float(df['val_loss'].iloc[idx_best])
+    else:
+        idx_best = len(df) - 1
+        best_epoch = int(df['epoch'].iloc[-1]) if 'epoch' in df.columns else len(df)
+        best_val = float('nan')
+    # pendientes finales
+    tail = df.tail(int(min(tail_epochs, len(df))))
+    tr_slope = _slope(tail['epoch'], tail['train_loss']) if 'train_loss' in df.columns else float('nan')
+    va_slope = _slope(tail['epoch'], tail['val_loss']) if 'val_loss' in df.columns else float('nan')
+    # heurística de overfitting: val sube mientras train baja o gap grande
+    overfit_flag = False
+    if np.isfinite(tr_slope) and np.isfinite(va_slope):
+        if tr_slope < 0 and va_slope > 0:
+            overfit_flag = True
+    if np.isfinite(gap_end) and gap_end > 0.3:  # umbral heurístico; ajustable por dataset
+        overfit_flag = True
+    return {
+        'run': os.path.basename(run_dir),
+        'dir': run_dir,
+        'best_epoch': best_epoch,
+        'best_val_loss': best_val,
+        'train_end': train_end,
+        'val_end': val_end,
+        'gap_end': gap_end,
+        'train_tail_slope': tr_slope,
+        'val_tail_slope': va_slope,
+        'overfit_flag': bool(overfit_flag),
+    }
+
+
 def compute_micro_pr(y_true, y_prob):
     try:
         precision, recall, _ = precision_recall_curve(y_true.ravel(), y_prob.ravel())
@@ -367,6 +426,20 @@ def main():
         plot_combined_micro_pr(run_dirs, os.path.join(args.root, 'combined_pr_micro.png'))
         # Evolución de AUPRC de validación por dataset
         plot_evolution_val_auprc(run_dirs, os.path.join(args.root, 'val_auprc_evolution.png'))
+
+    # Diagnóstico de overfitting por run
+    rows = []
+    for d in run_dirs:
+        r = compute_overfit_indicators(d)
+        if r is not None:
+            rows.append(r)
+    if rows:
+        import pandas as pd
+        df_over = pd.DataFrame(rows)
+        print('\nIndicadores de overfitting:')
+        print(df_over[['run','best_epoch','train_end','val_end','gap_end','train_tail_slope','val_tail_slope','overfit_flag']])
+        if args.save:
+            df_over.to_csv(os.path.join(args.root, 'overfit_summary.csv'), index=False)
 
 
 if __name__ == '__main__':
