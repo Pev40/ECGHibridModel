@@ -97,11 +97,19 @@ def _find_latest_checkpoint(exp_root):
 
 def _infer_hmst_config_from_state(state_dict):
     cfg = {}
-    w = state_dict.get('input_proj.weight', None)
+    
+    def _get_tensor(keys):
+        for k in keys:
+            v = state_dict.get(k, None)
+            if isinstance(v, torch.Tensor):
+                return v
+        return None
+
+    w = _get_tensor(['input_proj.weight'])
     if isinstance(w, torch.Tensor):
         cfg['d_model'] = int(w.shape[0])
         cfg['input_channels'] = int(w.shape[1])
-    ct = state_dict.get('cls_token', None)
+    ct = _get_tensor(['cls_token'])
     if isinstance(ct, torch.Tensor):
         cfg['d_model'] = int(ct.shape[-1])
     stage_idxs = []
@@ -113,13 +121,13 @@ def _infer_hmst_config_from_state(state_dict):
                 pass
     if stage_idxs:
         cfg['num_stages'] = max(stage_idxs) + 1
-    hc = state_dict.get('head_coarse.1.weight', None) or state_dict.get('head_coarse.weight', None)
+    hc = _get_tensor(['head_coarse.1.weight', 'head_coarse.weight'])
     if isinstance(hc, torch.Tensor):
         cfg['num_coarse'] = int(hc.shape[0])
-    hf = state_dict.get('head_fine.1.weight', None) or state_dict.get('head_fine.weight', None)
+    hf = _get_tensor(['head_fine.1.weight', 'head_fine.weight'])
     if isinstance(hf, torch.Tensor):
         cfg['num_fine'] = int(hf.shape[0])
-    sp = state_dict.get('snomed_proj.weight', None)
+    sp = _get_tensor(['snomed_proj.weight'])
     if isinstance(sp, torch.Tensor):
         cfg['snomed_dim'] = int(sp.shape[1])
     return cfg
