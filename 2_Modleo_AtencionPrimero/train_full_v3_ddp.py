@@ -65,11 +65,12 @@ def set_seed(seed=42, deterministic=False):
 
 
 def build_loaders_12large(sequence_len, hierarchy_path, batch_size, workers, cache_dir=None,
-                          target_fs=500.0, bandpass_hz=(0.5, 45.0), notch_hz=None, seed=42,
-                          smoke_test=False, smoke_n=256, is_distributed=False,
-                          aug_jitter_std=0.0, aug_shift_max=0, aug_lead_drop_prob=0.0,
-                          aug_amp_scale_min=1.0, aug_amp_scale_max=1.0,
-                          aug_lead_noise_scale_max=1.0, aug_time_warp_max=0.0, aug_time_warp_p=0.0):
+                         target_fs=500.0, bandpass_hz=(0.5, 45.0), notch_hz=None, seed=42,
+                         smoke_test=False, smoke_n=256, is_distributed=False,
+                         aug_jitter_std=0.0, aug_shift_max=0, aug_lead_drop_prob=0.0,
+                         aug_amp_scale_min=1.0, aug_amp_scale_max=1.0,
+                         aug_lead_noise_scale_max=1.0, aug_time_warp_max=0.0, aug_time_warp_p=0.0,
+                         sampler_weighted=False, max_weight=10.0):
     from glob import glob
     from datasets.ecg12large import extract_patient_id
 
@@ -111,8 +112,35 @@ def build_loaders_12large(sequence_len, hierarchy_path, batch_size, workers, cac
         val_sampler = None
         test_sampler = None
     
-    train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=(train_sampler is None),
-                         sampler=train_sampler, num_workers=workers, pin_memory=True)
+    # Sampler ponderado (solo si no hay sampler distribuido)
+    if sampler_weighted and (train_sampler is None) and not smoke_test:
+        try:
+            import numpy as _np
+            from torch.utils.data import WeightedRandomSampler as _WRS
+            # train_ds es Subset de HMSTPreprocessor → acceder a .dataset.samples y .indices
+            base_ds = train_ds.dataset
+            indices = train_ds.indices if hasattr(train_ds, 'indices') else list(range(len(train_ds)))
+            y_fines = [_np.asarray(base_ds.samples[i][2], dtype=_np.float32) for i in indices]
+            Y = _np.stack(y_fines, axis=0)
+            prev = Y.mean(axis=0)
+            inv = 1.0 / _np.clip(prev, 1e-6, None)
+            inv = _np.minimum(inv, float(max_weight))
+            weights = []
+            for yi in Y:
+                if yi.sum() > 0:
+                    w = float(inv[yi > 0].mean())
+                else:
+                    w = 1.0
+                weights.append(w)
+            wrs = _WRS(weights=torch.tensor(weights, dtype=torch.double), num_samples=len(weights), replacement=True)
+            train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=False,
+                                 sampler=wrs, num_workers=workers, pin_memory=True)
+        except Exception:
+            train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=(train_sampler is None),
+                                 sampler=train_sampler, num_workers=workers, pin_memory=True)
+    else:
+        train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=(train_sampler is None),
+                             sampler=train_sampler, num_workers=workers, pin_memory=True)
     val_dl = DataLoader(val_ds, batch_size=batch_size, shuffle=False,
                        sampler=val_sampler, num_workers=workers, pin_memory=True)
     test_dl = DataLoader(test_ds, batch_size=batch_size, shuffle=False,
@@ -280,39 +308,104 @@ def evaluate_v3(model, dl, fine_code_to_idx, coarse_groups, base_loss_fn, comput
             all_coarse_targets = torch.cat(all_coarse_targets, dim=0)
             all_fine_targets = torch.cat(all_fine_targets, dim=0)
         
-        # Compute metrics
+        # Compute metrics (robust to classes with only one label value)
         from sklearn.metrics import roc_auc_score, average_precision_score, f1_score
-        
-        try:
-            # Mover a CPU para sklearn
-            cp = all_coarse_preds.detach().cpu().numpy()
-            fp = all_fine_preds.detach().cpu().numpy()
-            ct = all_coarse_targets.detach().cpu().numpy()
-            ft = all_fine_targets.detach().cpu().numpy()
-            coarse_auroc = roc_auc_score(ct, cp, average='macro')
-            fine_auroc = roc_auc_score(ft, fp, average='macro')
-            coarse_auprc = average_precision_score(ct, cp, average='macro')
-            fine_auprc = average_precision_score(ft, fp, average='macro')
-            
-            coarse_pred_binary = (all_coarse_preds > 0.5).float().detach().cpu().numpy()
-            fine_pred_binary = (all_fine_preds > 0.5).float().detach().cpu().numpy()
-            coarse_f1 = f1_score(ct, coarse_pred_binary, average='macro')
-            fine_f1 = f1_score(ft, fine_pred_binary, average='macro')
-            
-            metrics = {
-                'coarse_auroc': coarse_auroc,
-                'fine_auroc': fine_auroc,
-                'coarse_auprc': coarse_auprc,
-                'fine_auprc': fine_auprc,
-                'coarse_f1': coarse_f1,
-                'fine_f1': fine_f1,
-                'macro_auroc': (coarse_auroc + fine_auroc) / 2,
-                'macro_auprc': (coarse_auprc + fine_auprc) / 2,
-                'macro_f1': (coarse_f1 + fine_f1) / 2
+
+        # Mover a CPU para sklearn
+        cp = all_coarse_preds.detach().cpu().numpy()
+        fp = all_fine_preds.detach().cpu().numpy()
+        ct = all_coarse_targets.detach().cpu().numpy()
+        ft = all_fine_targets.detach().cpu().numpy()
+
+        def _per_class_metrics(y_true_np, y_prob_np):
+            c = y_true_np.shape[1]
+            aurocs, auprcs, f1s = [], [], []
+            pos_counts = y_true_np.sum(axis=0)
+            neg_counts = (1.0 - y_true_np).sum(axis=0)
+            for i in range(c):
+                yi = y_true_np[:, i]
+                pi = y_prob_np[:, i]
+                has_pos = pos_counts[i] > 0
+                has_neg = neg_counts[i] > 0
+                if has_pos and has_neg:
+                    try:
+                        aurocs.append(roc_auc_score(yi, pi))
+                    except Exception:
+                        aurocs.append(np.nan)
+                else:
+                    aurocs.append(np.nan)
+                if has_pos:
+                    try:
+                        auprcs.append(average_precision_score(yi, pi))
+                    except Exception:
+                        auprcs.append(np.nan)
+                    try:
+                        f1s.append(f1_score(yi, (pi >= 0.5).astype(np.int32), zero_division=0))
+                    except Exception:
+                        f1s.append(np.nan)
+                else:
+                    auprcs.append(np.nan)
+                    f1s.append(np.nan)
+            def _nanmean_safe(arr):
+                return float(np.nanmean(arr)) if np.any(~np.isnan(arr)) else float('nan')
+            metrics_local = {
+                'auroc_macro': _nanmean_safe(np.array(aurocs, dtype=float)),
+                'auprc_macro': _nanmean_safe(np.array(auprcs, dtype=float)),
+                'f1_macro': _nanmean_safe(np.array(f1s, dtype=float)),
+                'num_valid_auroc': int(np.sum((pos_counts > 0) & (neg_counts > 0))),
+                'num_valid_auprc': int(np.sum(pos_counts > 0)),
+                'num_valid_f1': int(np.sum(pos_counts > 0)),
+                'num_allzero': int(np.sum(pos_counts == 0)),
+                'num_allone': int(np.sum(neg_counts == 0)),
+                'prevalence_mean': float(np.mean(y_true_np)),
             }
-        except Exception as e:
-            print(f'Error computing metrics: {e}')
-            metrics = {}
+            # Micro (probar, si falla devolver NaN)
+            try:
+                metrics_local['auroc_micro'] = float(roc_auc_score(y_true_np, y_prob_np, average='micro'))
+            except Exception:
+                metrics_local['auroc_micro'] = float('nan')
+            try:
+                metrics_local['auprc_micro'] = float(average_precision_score(y_true_np, y_prob_np, average='micro'))
+            except Exception:
+                metrics_local['auprc_micro'] = float('nan')
+            return metrics_local
+
+        coarse_m = _per_class_metrics(ct, cp)
+        fine_m = _per_class_metrics(ft, fp)
+
+        def _nm(x):
+            return x if (isinstance(x, float) and np.isfinite(x)) else np.nan
+
+        metrics = {
+            'coarse_auroc': coarse_m['auroc_macro'],
+            'coarse_auprc': coarse_m['auprc_macro'],
+            'coarse_f1': coarse_m['f1_macro'],
+            'coarse_auroc_micro': coarse_m['auroc_micro'],
+            'coarse_auprc_micro': coarse_m['auprc_micro'],
+            'coarse_num_valid_auroc': coarse_m['num_valid_auroc'],
+            'coarse_num_valid_auprc': coarse_m['num_valid_auprc'],
+            'coarse_num_valid_f1': coarse_m['num_valid_f1'],
+            'coarse_num_allzero': coarse_m['num_allzero'],
+            'coarse_num_allone': coarse_m['num_allone'],
+            'coarse_prevalence_mean': coarse_m['prevalence_mean'],
+
+            'fine_auroc': fine_m['auroc_macro'],
+            'fine_auprc': fine_m['auprc_macro'],
+            'fine_f1': fine_m['f1_macro'],
+            'fine_auroc_micro': fine_m['auroc_micro'],
+            'fine_auprc_micro': fine_m['auprc_micro'],
+            'fine_num_valid_auroc': fine_m['num_valid_auroc'],
+            'fine_num_valid_auprc': fine_m['num_valid_auprc'],
+            'fine_num_valid_f1': fine_m['num_valid_f1'],
+            'fine_num_allzero': fine_m['num_allzero'],
+            'fine_num_allone': fine_m['num_allone'],
+            'fine_prevalence_mean': fine_m['prevalence_mean'],
+
+            # Combinar coarse y fine con promedio ignorando NaN
+            'macro_auroc': float(np.nanmean([_nm(coarse_m['auroc_macro']), _nm(fine_m['auroc_macro'])])),
+            'macro_auprc': float(np.nanmean([_nm(coarse_m['auprc_macro']), _nm(fine_m['auprc_macro'])])),
+            'macro_f1': float(np.nanmean([_nm(coarse_m['f1_macro']), _nm(fine_m['f1_macro'])])),
+        }
     else:
         metrics = {}
     
@@ -353,6 +446,17 @@ def main():
     parser.add_argument('--no_auto_hierarchy', action='store_true')
     parser.add_argument('--smoke_test', action='store_true')
     parser.add_argument('--smoke_n', type=int, default=256)
+    # Augmentaciones y oversampling
+    parser.add_argument('--aug_jitter_std', type=float, default=0.0)
+    parser.add_argument('--aug_shift_max', type=int, default=0)
+    parser.add_argument('--aug_lead_drop_prob', type=float, default=0.0)
+    parser.add_argument('--aug_amp_scale_min', type=float, default=1.0)
+    parser.add_argument('--aug_amp_scale_max', type=float, default=1.0)
+    parser.add_argument('--aug_lead_noise_scale_max', type=float, default=1.0)
+    parser.add_argument('--aug_time_warp_max', type=float, default=0.0)
+    parser.add_argument('--aug_time_warp_p', type=float, default=0.0)
+    parser.add_argument('--oversample_minority', action='store_true')
+    parser.add_argument('--oversample_max_weight', type=float, default=10.0)
     # HMST params optimizados
     parser.add_argument('--hmst_d_model', type=int, default=128)  # Reducido
     parser.add_argument('--hmst_heads', type=int, default=4)  # Reducido
@@ -411,9 +515,12 @@ def main():
         notch_hz=(args.notch_hz if args.notch_hz in (50,60) else None),
         seed=args.seed, smoke_test=args.smoke_test, smoke_n=args.smoke_n,
         is_distributed=is_distributed,
-        aug_jitter_std=0.0, aug_shift_max=0, aug_lead_drop_prob=0.0,
-        aug_amp_scale_min=1.0, aug_amp_scale_max=1.0,
-        aug_lead_noise_scale_max=1.0, aug_time_warp_max=0.0, aug_time_warp_p=0.0,
+        aug_jitter_std=float(args.aug_jitter_std), aug_shift_max=int(args.aug_shift_max),
+        aug_lead_drop_prob=float(args.aug_lead_drop_prob),
+        aug_amp_scale_min=float(args.aug_amp_scale_min), aug_amp_scale_max=float(args.aug_amp_scale_max),
+        aug_lead_noise_scale_max=float(args.aug_lead_noise_scale_max),
+        aug_time_warp_max=float(args.aug_time_warp_max), aug_time_warp_p=float(args.aug_time_warp_p),
+        sampler_weighted=bool(args.oversample_minority), max_weight=float(args.oversample_max_weight)
     )
 
     # Modelo HMST

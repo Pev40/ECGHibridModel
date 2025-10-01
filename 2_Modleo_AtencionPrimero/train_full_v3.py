@@ -40,11 +40,12 @@ def set_seed(seed=42, deterministic=False):
 
 
 def build_loaders_12large(sequence_len, hierarchy_path, batch_size, workers, cache_dir=None,
-                          target_fs=500.0, bandpass_hz=(0.5, 45.0), notch_hz=None, seed=42,
-                          smoke_test=False, smoke_n=256,
-                          aug_jitter_std=0.0, aug_shift_max=0, aug_lead_drop_prob=0.0,
-                          aug_amp_scale_min=1.0, aug_amp_scale_max=1.0,
-                          aug_lead_noise_scale_max=1.0, aug_time_warp_max=0.0, aug_time_warp_p=0.0):
+                         target_fs=500.0, bandpass_hz=(0.5, 45.0), notch_hz=None, seed=42,
+                         smoke_test=False, smoke_n=256,
+                         aug_jitter_std=0.0, aug_shift_max=0, aug_lead_drop_prob=0.0,
+                         aug_amp_scale_min=1.0, aug_amp_scale_max=1.0,
+                         aug_lead_noise_scale_max=1.0, aug_time_warp_max=0.0, aug_time_warp_p=0.0,
+                         sampler_weighted=False, max_weight=10.0):
     from glob import glob
     from datasets.ecg12large import extract_patient_id
 
@@ -91,8 +92,36 @@ def build_loaders_12large(sequence_len, hierarchy_path, batch_size, workers, cac
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     pin = device.type == 'cuda'
-    tr_dl = DataLoader(tr_ds, batch_size=batch_size, shuffle=True, num_workers=workers,
-                       pin_memory=pin, persistent_workers=(workers>0), prefetch_factor=2 if workers>0 else None)
+    # Sampler ponderado opcional (solo train, no compatible con shuffle)
+    if sampler_weighted and not smoke_test:
+        try:
+            import numpy as _np
+            from torch.utils.data import WeightedRandomSampler as _WRS
+            y_fines = [_np.asarray(s[2], dtype=_np.float32) for s in tr_ds.samples]
+            if len(y_fines) > 0 and y_fines[0].ndim == 1:
+                Y = _np.stack(y_fines, axis=0)
+                prev = Y.mean(axis=0)
+                inv = 1.0 / _np.clip(prev, 1e-6, None)
+                inv = _np.minimum(inv, float(max_weight))
+                weights = []
+                for yi in Y:
+                    if yi.sum() > 0:
+                        w = float(inv[yi > 0].mean())
+                    else:
+                        w = 1.0
+                    weights.append(w)
+                sampler = _WRS(weights=torch.tensor(weights, dtype=torch.double), num_samples=len(weights), replacement=True)
+                tr_dl = DataLoader(tr_ds, batch_size=batch_size, shuffle=False, sampler=sampler, num_workers=workers,
+                                   pin_memory=pin, persistent_workers=(workers>0), prefetch_factor=2 if workers>0 else None)
+            else:
+                tr_dl = DataLoader(tr_ds, batch_size=batch_size, shuffle=True, num_workers=workers,
+                                   pin_memory=pin, persistent_workers=(workers>0), prefetch_factor=2 if workers>0 else None)
+        except Exception:
+            tr_dl = DataLoader(tr_ds, batch_size=batch_size, shuffle=True, num_workers=workers,
+                               pin_memory=pin, persistent_workers=(workers>0), prefetch_factor=2 if workers>0 else None)
+    else:
+        tr_dl = DataLoader(tr_ds, batch_size=batch_size, shuffle=True, num_workers=workers,
+                           pin_memory=pin, persistent_workers=(workers>0), prefetch_factor=2 if workers>0 else None)
     va_dl = DataLoader(va_ds, batch_size=batch_size, shuffle=False, num_workers=workers,
                        pin_memory=pin, persistent_workers=(workers>0), prefetch_factor=2 if workers>0 else None)
     te_dl = DataLoader(te_ds, batch_size=batch_size, shuffle=False, num_workers=workers,
@@ -261,12 +290,25 @@ def evaluate_v3(model, dl, fine_code_to_idx, coarse_groups, base_loss_fn, comput
         auprc_micro = _apr(y_true, y_prob, average='micro')
     except Exception:
         auprc_micro = float('nan')
+    pos_counts = y_true.sum(axis=0)
+    neg_counts = (1.0 - y_true).sum(axis=0)
+    num_valid_auroc = int(np.sum((pos_counts > 0) & (neg_counts > 0)))
+    num_valid_other = int(np.sum(pos_counts > 0))
+    num_allzero = int(np.sum(pos_counts == 0))
+    num_allone = int(np.sum(neg_counts == 0))
+    prevalence_mean = float(np.mean(y_true))
     metrics.update({
         'auroc_macro': nanmean_safe(np.array(aurocs, dtype=float)),
         'auprc_macro': nanmean_safe(np.array(auprcs, dtype=float)),
         'f1_macro': nanmean_safe(np.array(f1s, dtype=float)),
         'auroc_micro': float(auroc_micro),
         'auprc_micro': float(auprc_micro),
+        'num_valid_auroc': num_valid_auroc,
+        'num_valid_auprc': num_valid_other,
+        'num_valid_f1': num_valid_other,
+        'num_allzero': num_allzero,
+        'num_allone': num_allone,
+        'prevalence_mean': prevalence_mean,
         'y_true': y_true,
         'y_prob': y_prob,
     })
@@ -303,6 +345,17 @@ def main():
     parser.add_argument('--no_auto_hierarchy', action='store_true')
     parser.add_argument('--smoke_test', action='store_true')
     parser.add_argument('--smoke_n', type=int, default=256)
+    # Augmentaciones y oversampling
+    parser.add_argument('--aug_jitter_std', type=float, default=0.0)
+    parser.add_argument('--aug_shift_max', type=int, default=0)
+    parser.add_argument('--aug_lead_drop_prob', type=float, default=0.0)
+    parser.add_argument('--aug_amp_scale_min', type=float, default=1.0)
+    parser.add_argument('--aug_amp_scale_max', type=float, default=1.0)
+    parser.add_argument('--aug_lead_noise_scale_max', type=float, default=1.0)
+    parser.add_argument('--aug_time_warp_max', type=float, default=0.0)
+    parser.add_argument('--aug_time_warp_p', type=float, default=0.0)
+    parser.add_argument('--oversample_minority', action='store_true')
+    parser.add_argument('--oversample_max_weight', type=float, default=10.0)
     # HMST params
     parser.add_argument('--hmst_d_model', type=int, default=256)
     parser.add_argument('--hmst_heads', type=int, default=8)
@@ -351,9 +404,16 @@ def main():
         bandpass_hz=(args.bandpass_low, args.bandpass_high),
         notch_hz=(args.notch_hz if args.notch_hz in (50,60) else None),
         seed=args.seed, smoke_test=args.smoke_test, smoke_n=args.smoke_n,
-        aug_jitter_std=0.0, aug_shift_max=0, aug_lead_drop_prob=0.0,
-        aug_amp_scale_min=1.0, aug_amp_scale_max=1.0,
-        aug_lead_noise_scale_max=1.0, aug_time_warp_max=0.0, aug_time_warp_p=0.0,
+        aug_jitter_std=float(args.aug_jitter_std),
+        aug_shift_max=int(args.aug_shift_max),
+        aug_lead_drop_prob=float(args.aug_lead_drop_prob),
+        aug_amp_scale_min=float(args.aug_amp_scale_min),
+        aug_amp_scale_max=float(args.aug_amp_scale_max),
+        aug_lead_noise_scale_max=float(args.aug_lead_noise_scale_max),
+        aug_time_warp_max=float(args.aug_time_warp_max),
+        aug_time_warp_p=float(args.aug_time_warp_p),
+        sampler_weighted=bool(args.oversample_minority),
+        max_weight=float(args.oversample_max_weight)
     )
 
     # Modelo HMST

@@ -34,6 +34,18 @@ BANDPASS_HIGH=${BANDPASS_HIGH:-45.0}
 TARGET_FS=${TARGET_FS:-500.0}
 NOTCH_HZ=${NOTCH_HZ:-0}
 
+# Augmentations & oversampling (defaults; override via env)
+AUG_JITTER_STD=${AUG_JITTER_STD:-0.0}
+AUG_SHIFT_MAX=${AUG_SHIFT_MAX:-0}
+AUG_LEAD_DROP_PROB=${AUG_LEAD_DROP_PROB:-0.0}
+AUG_AMP_SCALE_MIN=${AUG_AMP_SCALE_MIN:-1.0}
+AUG_AMP_SCALE_MAX=${AUG_AMP_SCALE_MAX:-1.0}
+AUG_LEAD_NOISE_SCALE_MAX=${AUG_LEAD_NOISE_SCALE_MAX:-1.0}
+AUG_TIME_WARP_MAX=${AUG_TIME_WARP_MAX:-0.0}
+AUG_TIME_WARP_P=${AUG_TIME_WARP_P:-0.0}
+OVERSAMPLE_MINORITY=${OVERSAMPLE_MINORITY:-0}
+OVERSAMPLE_MAX_WEIGHT=${OVERSAMPLE_MAX_WEIGHT:-10.0}
+
 echo "=== Iniciando múltiples corridas del modelo HMST v3 ==="
 echo "Semillas a ejecutar: ${SEEDS[*]}"
 echo "Directorio base: ${BASE_EXP_DIR}"
@@ -69,6 +81,16 @@ for seed in "${SEEDS[@]}"; do
       --bandpass_low "${BANDPASS_LOW}" \
       --bandpass_high "${BANDPASS_HIGH}" \
       $( [[ "${NOTCH_HZ}" == "50" || "${NOTCH_HZ}" == "60" ]] && echo --notch_hz "${NOTCH_HZ}" ) \
+      --aug_jitter_std "${AUG_JITTER_STD}" \
+      --aug_shift_max "${AUG_SHIFT_MAX}" \
+      --aug_lead_drop_prob "${AUG_LEAD_DROP_PROB}" \
+      --aug_amp_scale_min "${AUG_AMP_SCALE_MIN}" \
+      --aug_amp_scale_max "${AUG_AMP_SCALE_MAX}" \
+      --aug_lead_noise_scale_max "${AUG_LEAD_NOISE_SCALE_MAX}" \
+      --aug_time_warp_max "${AUG_TIME_WARP_MAX}" \
+      --aug_time_warp_p "${AUG_TIME_WARP_P}" \
+      $( [[ "${OVERSAMPLE_MINORITY}" == "1" ]] && echo --oversample_minority ) \
+      --oversample_max_weight "${OVERSAMPLE_MAX_WEIGHT}" \
       --hmst_d_model "${HMST_D}" \
       --hmst_heads "${HMST_HEADS}" \
       --hmst_layers "${HMST_LAYERS}" \
