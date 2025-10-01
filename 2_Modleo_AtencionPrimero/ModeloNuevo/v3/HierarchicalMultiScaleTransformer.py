@@ -94,8 +94,19 @@ class HMST(nn.Module):
         
         # Fuse con jerarquía: Modula fuse con hier_matrix (para label-aware)
         x_fused = torch.cat(stages_out, dim=-1)  # [B, T, num_stages*d_model]
-        hier_mod = self.hier_matrix.mean(dim=0).unsqueeze(0).unsqueeze(0).expand(b, t, -1)  # [B, T, num_coarse]
-        x_fused = x_fused * hier_mod.unsqueeze(1).expand(-1, -1, self.num_stages * self.d_model // self.num_coarse)  # Modulate
+        
+        # ARREGLADO: Calcular la modulación correctamente
+        hier_mod = self.hier_matrix.mean(dim=0).unsqueeze(0).unsqueeze(0)  # [1, 1, num_coarse]
+        # Expandir para que coincida con las dimensiones de x_fused
+        hier_mod_expanded = hier_mod.expand(b, t, self.num_coarse)  # [B, T, num_coarse]
+        
+        # Aplicar modulación solo si las dimensiones son compatibles
+        if x_fused.shape[-1] % self.num_coarse == 0:
+            # Reshape x_fused para aplicar la modulación
+            x_fused_reshaped = x_fused.view(b, t, self.num_coarse, -1)  # [B, T, num_coarse, features_per_coarse]
+            x_fused_reshaped = x_fused_reshaped * hier_mod_expanded.unsqueeze(-1)  # [B, T, num_coarse, features_per_coarse]
+            x_fused = x_fused_reshaped.view(b, t, -1)  # [B, T, num_stages*d_model]
+        
         x_fused = self.fuse_linear(x_fused)
         
         # Transformer con token CLS modulado por SNOMED

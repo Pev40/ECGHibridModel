@@ -13,7 +13,7 @@ import torch.nn as nn
 import os
 
 class HMSTPreprocessor(ECG12Large):  # Extiende
-    def __init__(self, *args, wide_feats=True, balance_rare=True, **kwargs):
+    def __init__(self, *args, wide_feats=True, balance_rare=False, **kwargs):  # Desactivar balance_rare por defecto
         super().__init__(*args, **kwargs)
         self.wide_feats = wide_feats
         self.balance_rare = balance_rare
@@ -23,80 +23,11 @@ class HMSTPreprocessor(ECG12Large):  # Extiende
         if not hasattr(self, 'hierarchy') or self.hierarchy is None:
             raise ValueError("Hierarchy not loaded. Make sure hierarchy_path is valid and file exists.")
         
-        # Ahora sí cargar SNOMED después de que self.hierarchy esté disponible
-        self.snomed_hier = self._load_snomed_hierarchy_from_csv()  
+        # Usar solo los datos reales de la jerarquía (sin CSV)
+        self.snomed_hier = self._create_hierarchy_based_fallback()
+        
         if self.balance_rare:
             self._balance_labels()  # SMOTE en init
-
-    def _load_snomed_hierarchy_from_csv(self, csv_path='datos/12Large/ConditionNames_SNOMED-CT.csv'):
-        # Verificar que el archivo CSV existe
-        if not os.path.exists(csv_path):
-            print(f"Warning: CSV file {csv_path} not found, using hierarchy-based fallback")
-            return self._create_hierarchy_based_fallback()
-            
-        # Lee CSV local con las columnas correctas
-        try:
-            df = pd.read_csv(csv_path)
-            print(f"CSV cargado: {len(df)} filas, columnas: {list(df.columns)}")
-            
-            hier = {}  # {fine_code: {'coarse_code': str, 'snomed_coarse': str, 'is_a': bool}}
-            
-            # Mapear códigos SNOMED del CSV a la jerarquía existente
-            for _, row in df.iterrows():
-                snomed_code = str(row['Snomed_CT']).strip()
-                acronym = str(row['Acronym Name']).strip()
-                full_name = str(row['Full Name']).strip()
-                
-                # Buscar este código SNOMED en los fine_codes de la jerarquía
-                if snomed_code in self.fine_codes:
-                    # Encontrar el coarse correspondiente en la jerarquía
-                    coarse_name = None
-                    for coarse, fine_list in self.hierarchy.get('fine_to_coarse', {}).items():
-                        if snomed_code in fine_list:
-                            coarse_name = coarse
-                            break
-                    
-                    if coarse_name:
-                        hier[snomed_code] = {
-                            'coarse': coarse_name,
-                            'snomed_coarse': snomed_code,  # Usar el mismo código
-                            'is_a': True,
-                            'acronym': acronym,
-                            'full_name': full_name
-                        }
-                        print(f"Mapeado: {acronym} ({snomed_code}) -> {coarse_name}")
-                    else:
-                        print(f"Warning: No se encontró coarse para {acronym} ({snomed_code})")
-                else:
-                    print(f"Warning: Código {snomed_code} no está en fine_codes")
-                    
-        except Exception as e:
-            print(f"Error reading CSV: {e}, using hierarchy-based fallback")
-            return self._create_hierarchy_based_fallback()
-            
-        # Merge con self.hierarchy para asegurar que tenemos todos los códigos
-        for fine, coarse in self.hierarchy.get('fine_to_coarse', {}).items():
-            if fine not in hier:
-                hier[fine] = {
-                    'coarse': coarse, 
-                    'snomed_coarse': fine,  # Usar el mismo código
-                    'is_a': True
-                }
-        
-        # Construye matriz learnable [num_fine, num_coarse] para loss (1 si is_a)
-        num_fine = len(self.fine_codes) if self.fine_codes else 71
-        num_coarse = len(self.coarse_names) if self.coarse_names else 10
-        hier_matrix = torch.zeros(num_fine, num_coarse)
-        
-        for i, fine in enumerate(self.fine_codes):
-            if fine in hier and hier[fine]['is_a']:
-                coarse_idx = self.coarse_name_to_idx.get(hier[fine]['coarse'], 0)
-                hier_matrix[i, coarse_idx] = 1.0
-        
-        self.hier_matrix = nn.Parameter(hier_matrix)  # Learnable en model
-        print(f"SNOMED cargado de CSV: {len(hier)} mappings, matriz {hier_matrix.shape}")
-        print(f"Códigos mapeados desde CSV: {len([k for k in hier.keys() if 'acronym' in hier[k]])}")
-        return hier
 
     def _create_hierarchy_based_fallback(self):
         """Crear jerarquía basada en self.hierarchy existente (datos reales)"""
@@ -123,7 +54,7 @@ class HMSTPreprocessor(ECG12Large):  # Extiende
                     hier_matrix[i, coarse_idx] = 1.0
         
         self.hier_matrix = nn.Parameter(hier_matrix)  # Learnable en model
-        print(f"SNOMED fallback basado en hierarchy: {len(hier)} mappings, matriz {hier_matrix.shape}")
+        print(f"SNOMED basado en hierarchy: {len(hier)} mappings, matriz {hier_matrix.shape}")
         return hier
 
     def _balance_labels(self):
