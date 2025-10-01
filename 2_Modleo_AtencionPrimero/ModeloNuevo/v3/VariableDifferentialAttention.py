@@ -5,7 +5,7 @@ from einops import rearrange
 
 class VariableDifferentialAttention(nn.Module):
     """Mejorado: Differential full como Diff Transformer, adaptado a multi-lead (intra vs inter)"""
-    def __init__(self, d_model, nhead=8, dropout=0.1, chunk_size=512):
+    def __init__(self, d_model, nhead=8, dropout=0.1, chunk_size=256):
         super().__init__()
         self.norm = nn.LayerNorm(d_model)
         self.attn_var = VariableAttention(d_model, heads=nhead, dropout=dropout)  # Base
