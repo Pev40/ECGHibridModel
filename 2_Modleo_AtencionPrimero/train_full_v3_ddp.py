@@ -406,6 +406,12 @@ def evaluate_v3(model, dl, fine_code_to_idx, coarse_groups, base_loss_fn, comput
             'macro_auprc': float(np.nanmean([_nm(coarse_m['auprc_macro']), _nm(fine_m['auprc_macro'])])),
             'macro_f1': float(np.nanmean([_nm(coarse_m['f1_macro']), _nm(fine_m['f1_macro'])])),
         }
+        # Alias compatibles con evaluate_results.py (usa sufijo _macro y micro global en fine)
+        metrics['auroc_macro'] = metrics['macro_auroc']
+        metrics['auprc_macro'] = metrics['macro_auprc']
+        metrics['f1_macro'] = metrics['macro_f1']
+        metrics['auroc_micro'] = fine_m['auroc_micro']
+        metrics['auprc_micro'] = fine_m['auprc_micro']
         # Incluir arrays de test (fine) para graficado externo
         metrics['y_true'] = ft
         metrics['y_prob'] = fp
