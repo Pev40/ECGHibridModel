@@ -1,0 +1,107 @@
+﻿Acronym Name,Full Name,Snomed_CT
+1AVB,1 degree atrioventricular block,270492004
+2AVB,2 degree atrioventricular block,195042002
+2AVB1,2 degree atrioventricular block(Type one),54016002
+2AVB2,2 degree atrioventricular block(Type two),28189009
+3AVB,3 degree atrioventricular block,27885002
+ABI,atrial bigeminy,251173003
+ALS,Axis left shift,39732003
+APB,atrial premature beats,284470004
+AQW,abnormal Q wave,164917005
+ARS,Axis right shift,47665007
+AVB,atrioventricular block,233917008
+CCR,countercolockwise rotation,251199005
+CR,colockwise rotation,251198002
+ERV,Early repolarization of the ventricles,428417006
+FQRS,fQRS Wave,164942001
+IDC,Interior differences conduction,698252002
+IVB,Intraventricular block,698252002
+JEB,junctional escape beat,426995002
+JPT,junctional premature beat,251164006
+LBBB,left bundle branch block,164909002
+LBBBB,left back bundle branch block,164909002
+LFBBB,left front bundle branch block,164909002
+LVH,left ventricle hypertrophy,164873001
+LVQRSAL,lower voltage QRS in all lead,251146004
+LVQRSCL,lower voltage QRS in chest lead,251148003
+LVQRSLL,lower voltage QRS in limb lead,251147008
+MI,myocardial infarction,164865005
+MIBW,myocardial infraction in back wall,164865005
+MIFW,Myocardial infgraction in the front wall,164865005
+MILW,Myocardial infraction in the lower wall,164865005
+MISW,Myocardial infraction in the side wall,164865005
+PRIE,PR interval extension,164947007
+PWC,P wave Change,164912004
+QTIE,QT interval extension,111975006
+RAH,right atrial hypertrophy,446358003
+RBBB,right bundle branch block,59118001
+RVH,right ventricle hypertrophy,89792004
+STDD,ST drop down,429622005
+STE,ST extension,164930006
+STTC,ST-T Change,428750005
+STTU,ST tilt up,164931005
+TWC,T wave Change,164934002
+TWO,T wave opposite,59931005
+UW,U wave,164937009
+VB,ventricular bigeminy,11157007
+VEB,ventricular escape beat,75532003
+VFW,ventricular fusion wave,13640000
+VPB,ventricular premature beat,17338001
+VPE,ventricular preexcitation,195060002
+VET,ventricular escape trigeminy,251180001
+WAVN,Wandering in the atrioventricalualr node,195101003
+WPW,WPW,74390002
+SB,Sinus Bradycardia,426177001
+SR,Sinus Rhythm,426783006
+AFIB,Atrial Fibrillation,164889003
+ST,Sinus Tachycardia,427084000
+AF,Atrial Flutter,164890007
+SA,Sinus Irregularity,427393009
+SVT,Supraventricular Tachycardia,426761007
+AT,Atrial Tachycardia,713422000
+AVNRT,Atrioventricular  Node Reentrant Tachycardia,233896004
+AVRT,Atrioventricular Reentrant Tachycardia,233897008
+SAAWR,Sinus Atrium to Atrial Wandering Rhythm,195101003
+RAE,Right atrial enlargement (disorder),67751000119106
+AVNRT,Atrioventricular nodal re-entry tachycardia (disorder),251166008
+AA,Atrial arrhythmia (disorder),17366009
+ER,Ectopic rhythm (disorder),29320008
+PVT,Electrocardiogram: paroxysmal ventricular tachycardia (finding),425856008
+STC,Electrocardiographic ST segment changes (finding),55930002
+AR,Atrial rhythm (finding),106068003
+AVD,Atrioventricular dissociation (disorder),50799005
+CCVL,Counterclockwise vectorcardiographic loop (finding),61721007
+AMI,Acute myocardial infarction (disorder),57054005
+AMI-AW,Acute myocardial infarction of anterior wall (disorder),54329005
+TPW,Tall P wave (finding),251223006
+PPW,Prolonged P wave (finding),251205003
+VF,Electrocardiographic ventricular fibrillation (finding),164896001
+MOB2,Electrocardiographic Mobitz type II atrioventricular block (finding),426183003
+SQT,Shortened QT interval (finding),77867006
+SAB,Sinoatrial block (disorder),65778007
+AEC,Atrial escape complex (disorder),251187003
+BPAC,Blocked premature atrial contraction (disorder),251170000
+SAR,Sinus arrest (disorder),5609005
+ILBBB,Incomplete left bundle branch block (disorder),251120003
+VER,Ventricular escape rhythm (disorder),81898007
+EAT,Ectopic atrial tachycardia (disorder),233892002
+LPFB,Left posterior fascicular block on electrocardiogram (finding),445211001
+JT,Electrocardiogram: junctional tachycardia (finding),426648003
+AIVR,Accelerated idioventricular rhythm (disorder),61277005
+BRUG,Brugada syndrome (disorder),418818005
+AJR,Electrocardiographic accelerated junctional rhythm (finding),426664006
+SPR,Shortened PR interval (finding),49578007
+LAH,Left atrial hypertrophy (disorder),446813000
+LAE,Left atrial enlargement (disorder),67741000119109
+VFL,Ventricular flutter (disorder),111288001
+LVH,Left ventricular hypertrophy (disorder),55827005
+LAFB,Left anterior fascicular block on electrocardiogram (finding),445118002
+CRBBB,Electrocardiographic complete right bundle branch block (finding),713427006
+PVC,Electrocardiogram: premature ventricular contractions (finding),427172004
+RW,Finding of electrocardiogram R wave (finding),365413008
+CLBBB,Electrocardiographic complete left bundle branch block (finding),733534002
+IRBBB,Electrocardiographic incomplete right bundle branch block (finding),713426002
+BBB,Bundle branch block (disorder),6374002
+APACE,Rhythm from artificial pacing (finding),10370003
+SVPB,Supraventricular premature beats (disorder),63593006
+BRADY,Electrocardiogram: bradycardia (finding),426627000
