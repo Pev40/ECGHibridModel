@@ -35,12 +35,14 @@ class HMSTPreprocessor(ECG12Large):  # Extiende
         
         # Usar self.hierarchy como base (datos reales)
         if hasattr(self, 'hierarchy') and self.hierarchy is not None:
-            for fine, coarse in self.hierarchy.get('fine_to_coarse', {}).items():
-                hier[fine] = {
-                    'coarse': coarse, 
-                    'snomed_coarse': fine,  # Usar el mismo código
-                    'is_a': True
-                }
+            # Crear mapeo fine_to_coarse desde coarse_groups
+            for coarse_name, fine_codes_list in self.hierarchy.get('coarse_groups', {}).items():
+                for fine_code in fine_codes_list:
+                    hier[fine_code] = {
+                        'coarse': coarse_name, 
+                        'snomed_coarse': fine_code,  # Usar el mismo código
+                        'is_a': True
+                    }
         
         # Construye matriz learnable [num_fine, num_coarse] para loss (1 si is_a)
         num_fine = len(self.fine_codes) if self.fine_codes else 71
