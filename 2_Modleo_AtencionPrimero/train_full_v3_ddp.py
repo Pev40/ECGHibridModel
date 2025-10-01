@@ -196,36 +196,84 @@ def evaluate_v3(model, dl, fine_code_to_idx, coarse_groups, base_loss_fn, comput
             n_samples += b
             
             if compute_stats:
-                all_coarse_preds.append(torch.sigmoid(logits_coarse).cpu())
-                all_fine_preds.append(torch.sigmoid(logits_fine).cpu())
-                all_coarse_targets.append(y_coarse.cpu())
-                all_fine_targets.append(y_fine.cpu())
+                # Mantener en CUDA para NCCL; no pasar a CPU antes del all_gather
+                all_coarse_preds.append(torch.sigmoid(logits_coarse))
+                all_fine_preds.append(torch.sigmoid(logits_fine))
+                all_coarse_targets.append(y_coarse)
+                all_fine_targets.append(y_fine)
     
     mean_loss = total_loss / n_samples
     
     if compute_stats and len(all_coarse_preds) > 0:
         # Gather predictions from all processes
         if is_distributed:
+            # Concatenar locales (CUDA)
             all_coarse_preds = torch.cat(all_coarse_preds, dim=0)
             all_fine_preds = torch.cat(all_fine_preds, dim=0)
             all_coarse_targets = torch.cat(all_coarse_targets, dim=0)
             all_fine_targets = torch.cat(all_fine_targets, dim=0)
-            
-            # Gather from all processes
-            gathered_coarse_preds = [torch.zeros_like(all_coarse_preds) for _ in range(dist.get_world_size())]
-            gathered_fine_preds = [torch.zeros_like(all_fine_preds) for _ in range(dist.get_world_size())]
-            gathered_coarse_targets = [torch.zeros_like(all_coarse_targets) for _ in range(dist.get_world_size())]
-            gathered_fine_targets = [torch.zeros_like(all_fine_targets) for _ in range(dist.get_world_size())]
-            
-            dist.all_gather(gathered_coarse_preds, all_coarse_preds)
-            dist.all_gather(gathered_fine_preds, all_fine_preds)
-            dist.all_gather(gathered_coarse_targets, all_coarse_targets)
-            dist.all_gather(gathered_fine_targets, all_fine_targets)
-            
-            all_coarse_preds = torch.cat(gathered_coarse_preds, dim=0)
-            all_fine_preds = torch.cat(gathered_fine_preds, dim=0)
-            all_coarse_targets = torch.cat(gathered_coarse_targets, dim=0)
-            all_fine_targets = torch.cat(gathered_fine_targets, dim=0)
+
+            ws = dist.get_world_size()
+            # Recolectar longitudes (CUDA int64)
+            n_cp = torch.tensor([all_coarse_preds.size(0)], device=device, dtype=torch.int64)
+            n_fp = torch.tensor([all_fine_preds.size(0)], device=device, dtype=torch.int64)
+            n_ct = torch.tensor([all_coarse_targets.size(0)], device=device, dtype=torch.int64)
+            n_ft = torch.tensor([all_fine_targets.size(0)], device=device, dtype=torch.int64)
+            g_n_cp = [torch.zeros(1, device=device, dtype=torch.int64) for _ in range(ws)]
+            g_n_fp = [torch.zeros(1, device=device, dtype=torch.int64) for _ in range(ws)]
+            g_n_ct = [torch.zeros(1, device=device, dtype=torch.int64) for _ in range(ws)]
+            g_n_ft = [torch.zeros(1, device=device, dtype=torch.int64) for _ in range(ws)]
+            dist.all_gather(g_n_cp, n_cp)
+            dist.all_gather(g_n_fp, n_fp)
+            dist.all_gather(g_n_ct, n_ct)
+            dist.all_gather(g_n_ft, n_ft)
+            max_cp = int(torch.stack([t[0] for t in g_n_cp]).max().item())
+            max_fp = int(torch.stack([t[0] for t in g_n_fp]).max().item())
+            max_ct = int(torch.stack([t[0] for t in g_n_ct]).max().item())
+            max_ft = int(torch.stack([t[0] for t in g_n_ft]).max().item())
+
+            # Acolchado a máximos
+            if all_coarse_preds.size(0) < max_cp:
+                pad = max_cp - all_coarse_preds.size(0)
+                all_coarse_preds = F.pad(all_coarse_preds, (0, 0, 0, pad))
+            if all_fine_preds.size(0) < max_fp:
+                pad = max_fp - all_fine_preds.size(0)
+                all_fine_preds = F.pad(all_fine_preds, (0, 0, 0, pad))
+            if all_coarse_targets.size(0) < max_ct:
+                pad = max_ct - all_coarse_targets.size(0)
+                all_coarse_targets = F.pad(all_coarse_targets, (0, 0, 0, pad))
+            if all_fine_targets.size(0) < max_ft:
+                pad = max_ft - all_fine_targets.size(0)
+                all_fine_targets = F.pad(all_fine_targets, (0, 0, 0, pad))
+
+            # Gather en CUDA
+            g_cp = [torch.empty_like(all_coarse_preds, device=device) for _ in range(ws)]
+            g_fp = [torch.empty_like(all_fine_preds, device=device) for _ in range(ws)]
+            g_ct = [torch.empty_like(all_coarse_targets, device=device) for _ in range(ws)]
+            g_ft = [torch.empty_like(all_fine_targets, device=device) for _ in range(ws)]
+            dist.all_gather(g_cp, all_coarse_preds)
+            dist.all_gather(g_fp, all_fine_preds)
+            dist.all_gather(g_ct, all_coarse_targets)
+            dist.all_gather(g_ft, all_fine_targets)
+
+            parts_cp, parts_fp, parts_ct, parts_ft = [], [], [], []
+            for r in range(ws):
+                n_r_cp = int(g_n_cp[r][0].item())
+                n_r_fp = int(g_n_fp[r][0].item())
+                n_r_ct = int(g_n_ct[r][0].item())
+                n_r_ft = int(g_n_ft[r][0].item())
+                if n_r_cp > 0:
+                    parts_cp.append(g_cp[r][:n_r_cp])
+                if n_r_fp > 0:
+                    parts_fp.append(g_fp[r][:n_r_fp])
+                if n_r_ct > 0:
+                    parts_ct.append(g_ct[r][:n_r_ct])
+                if n_r_ft > 0:
+                    parts_ft.append(g_ft[r][:n_r_ft])
+            all_coarse_preds = torch.cat(parts_cp, dim=0) if parts_cp else all_coarse_preds[:0]
+            all_fine_preds = torch.cat(parts_fp, dim=0) if parts_fp else all_fine_preds[:0]
+            all_coarse_targets = torch.cat(parts_ct, dim=0) if parts_ct else all_coarse_targets[:0]
+            all_fine_targets = torch.cat(parts_ft, dim=0) if parts_ft else all_fine_targets[:0]
         else:
             all_coarse_preds = torch.cat(all_coarse_preds, dim=0)
             all_fine_preds = torch.cat(all_fine_preds, dim=0)
@@ -236,15 +284,20 @@ def evaluate_v3(model, dl, fine_code_to_idx, coarse_groups, base_loss_fn, comput
         from sklearn.metrics import roc_auc_score, average_precision_score, f1_score
         
         try:
-            coarse_auroc = roc_auc_score(all_coarse_targets.numpy(), all_coarse_preds.numpy(), average='macro')
-            fine_auroc = roc_auc_score(all_fine_targets.numpy(), all_fine_preds.numpy(), average='macro')
-            coarse_auprc = average_precision_score(all_coarse_targets.numpy(), all_coarse_preds.numpy(), average='macro')
-            fine_auprc = average_precision_score(all_fine_targets.numpy(), all_fine_preds.numpy(), average='macro')
+            # Mover a CPU para sklearn
+            cp = all_coarse_preds.detach().cpu().numpy()
+            fp = all_fine_preds.detach().cpu().numpy()
+            ct = all_coarse_targets.detach().cpu().numpy()
+            ft = all_fine_targets.detach().cpu().numpy()
+            coarse_auroc = roc_auc_score(ct, cp, average='macro')
+            fine_auroc = roc_auc_score(ft, fp, average='macro')
+            coarse_auprc = average_precision_score(ct, cp, average='macro')
+            fine_auprc = average_precision_score(ft, fp, average='macro')
             
-            coarse_pred_binary = (all_coarse_preds > 0.5).float()
-            fine_pred_binary = (all_fine_preds > 0.5).float()
-            coarse_f1 = f1_score(all_coarse_targets.numpy(), coarse_pred_binary.numpy(), average='macro')
-            fine_f1 = f1_score(all_fine_targets.numpy(), fine_pred_binary.numpy(), average='macro')
+            coarse_pred_binary = (all_coarse_preds > 0.5).float().detach().cpu().numpy()
+            fine_pred_binary = (all_fine_preds > 0.5).float().detach().cpu().numpy()
+            coarse_f1 = f1_score(ct, coarse_pred_binary, average='macro')
+            fine_f1 = f1_score(ft, fine_pred_binary, average='macro')
             
             metrics = {
                 'coarse_auroc': coarse_auroc,
