@@ -462,6 +462,9 @@ def main():
     parser.add_argument('--hmst_heads', type=int, default=4)  # Reducido
     parser.add_argument('--hmst_layers', type=int, default=4)  # Reducido
     parser.add_argument('--hmst_stages', type=int, default=2)  # Reducido
+    # Eval-only
+    parser.add_argument('--eval_only', action='store_true')
+    parser.add_argument('--ckpt_path', type=str, default='')
     args = parser.parse_args()
 
     # Solo el proceso 0 imprime logs
@@ -560,6 +563,40 @@ def main():
 
     best_val = math.inf
     epochs_no_improve = 0
+
+    # Ruta por defecto de checkpoint
+    default_ckpt_path = os.path.join(args.exp_dir, 'ckpt_best.pt')
+
+    # Modo evaluación únicamente (no entrena)
+    if args.eval_only:
+        # Cargar checkpoint
+        ckpt_to_load = args.ckpt_path if (args.ckpt_path and os.path.exists(args.ckpt_path)) else default_ckpt_path
+        if not os.path.exists(ckpt_to_load):
+            raise FileNotFoundError(f'No se encontró checkpoint para evaluar: {ckpt_to_load}')
+        state = torch.load(ckpt_to_load, map_location=device)
+        if is_distributed:
+            model.module.load_state_dict(state['model_state_dict'] if 'model_state_dict' in state else state['model'])
+        else:
+            model.load_state_dict(state['model_state_dict'] if 'model_state_dict' in state else state['model'])
+        if is_distributed:
+            dist.barrier()
+        # Evaluación en test
+        if not is_distributed or rank == 0:
+            print('Evaluando en test set (eval_only)...')
+        test_loss, test_metrics = evaluate_v3(model, te_dl, fine_code_to_idx, coarse_groups,
+                                              base_loss_fn, compute_stats=True,
+                                              use_dice_on_fine=getattr(args, 'use_dice_on_fine', False),
+                                              dice_weight=getattr(args, 'dice_weight', 0.5),
+                                              device=device, is_distributed=is_distributed)
+        if is_distributed:
+            dist.barrier()
+        if not is_distributed or rank == 0:
+            print(f'Test results: {test_metrics}')
+            os.makedirs(args.exp_dir, exist_ok=True)
+            with open(os.path.join(args.exp_dir, 'test_metrics.json'), 'w') as f:
+                json.dump(test_metrics, f, indent=2)
+        cleanup_ddp()
+        return
     
     for epoch in range(1, args.epochs + 1):
         # Set epoch for distributed sampler
@@ -632,24 +669,25 @@ def main():
         # Scheduler step
         scheduler.step(val_loss)
         current_lr = opt.param_groups[0]['lr']
-        
-        # Logging (solo proceso 0)
+
+        # Early stopping sincronizado entre ranks
+        stop_now = torch.tensor([0], device=device)
         if not is_distributed or rank == 0:
             val_auroc = val_metrics.get('macro_auroc', 0.0)
             val_auprc = val_metrics.get('macro_auprc', 0.0)
             val_f1 = val_metrics.get('macro_f1', 0.0)
-            
+
             print(f'Epoch {epoch}: train_loss={train_sum/train_n:.4f}, val_loss={val_loss:.4f}, '
                   f'val_auroc={val_auroc:.4f}, val_auprc={val_auprc:.4f}, val_f1={val_f1:.4f}, lr={current_lr:.2e}')
-            
+
             with open(log_path, 'a', encoding='utf-8') as f:
                 f.write(f'{epoch},{train_sum/train_n:.6f},{val_loss:.6f},{val_auroc:.6f},{val_auprc:.6f},{val_f1:.6f},{current_lr:.6e}\n')
-            
-            # Early stopping
+
+            # Early stopping: decidir en rank 0
             if val_loss < best_val - args.early_stopping_min_delta:
                 best_val = val_loss
                 epochs_no_improve = 0
-                # Save checkpoint
+                # Guardar checkpoint (solo rank 0)
                 torch.save({
                     'epoch': epoch,
                     'model_state_dict': model.module.state_dict() if is_distributed else model.state_dict(),
@@ -662,19 +700,39 @@ def main():
                 epochs_no_improve += 1
                 if epochs_no_improve >= args.early_stopping_patience:
                     print(f'Early stopping at epoch {epoch}')
-                    break
+                    stop_now = torch.tensor([1], device=device)
 
-    # Evaluación final
-    if not is_distributed or rank == 0:
+        # Broadcast de la decisión de parada a todos los ranks
+        if is_distributed:
+            dist.broadcast(stop_now, src=0)
+        if int(stop_now.item()) == 1:
+            break
+
+    # Cargar mejor checkpoint antes de test (en todos los ranks para sincronía)
+    if os.path.exists(default_ckpt_path):
+        state = torch.load(default_ckpt_path, map_location=device)
+        if is_distributed:
+            model.module.load_state_dict(state['model_state_dict'] if 'model_state_dict' in state else state['model'])
+        else:
+            model.load_state_dict(state['model_state_dict'] if 'model_state_dict' in state else state['model'])
+    if is_distributed:
+        dist.barrier()
+
+    # Evaluación final (todos los ranks ejecutan para evitar deadlocks; guarda/imprime solo rank 0)
+    if is_distributed:
+        dist.barrier()
+    print_prefix = (not is_distributed) or (rank == 0)
+    if print_prefix:
         print('Evaluando en test set...')
-        test_loss, test_metrics = evaluate_v3(model, te_dl, fine_code_to_idx, coarse_groups, 
-                                            base_loss_fn, compute_stats=True,
-                                            use_dice_on_fine=getattr(args, 'use_dice_on_fine', False),
-                                            dice_weight=getattr(args, 'dice_weight', 0.5),
-                                            device=device, is_distributed=is_distributed)
-        
+    test_loss, test_metrics = evaluate_v3(model, te_dl, fine_code_to_idx, coarse_groups, 
+                                        base_loss_fn, compute_stats=True,
+                                        use_dice_on_fine=getattr(args, 'use_dice_on_fine', False),
+                                        dice_weight=getattr(args, 'dice_weight', 0.5),
+                                        device=device, is_distributed=is_distributed)
+    if is_distributed:
+        dist.barrier()
+    if print_prefix:
         print(f'Test results: {test_metrics}')
-        
         # Save final results
         with open(os.path.join(args.exp_dir, 'test_metrics.json'), 'w') as f:
             json.dump(test_metrics, f, indent=2)
