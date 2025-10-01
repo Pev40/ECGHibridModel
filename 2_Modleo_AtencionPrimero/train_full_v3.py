@@ -6,6 +6,7 @@ import numpy as np
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
+import torch.distributed as dist
 try:
     from torch.amp import autocast as _autocast_new, GradScaler  # PyTorch >=2.0
     def autocast_cuda(enabled):
@@ -168,13 +169,53 @@ def evaluate_v3(model, dl, fine_code_to_idx, coarse_groups, base_loss_fn, comput
             loss_sum += loss.item() * x.size(0)
             count += x.size(0)
             if compute_stats:
-                all_y_fine.append(y_fine.cpu())
-                all_p_fine.append(torch.sigmoid(logits_fine).cpu())
+                # Mantener en CUDA para usar NCCL all_gather si está inicializado
+                all_y_fine.append(y_fine)
+                all_p_fine.append(torch.sigmoid(logits_fine))
     mean_loss = loss_sum / max(1, count)
     if not compute_stats or len(all_y_fine) == 0:
         return mean_loss, {}
-    y_true = torch.cat(all_y_fine, dim=0).numpy()
-    y_prob = torch.cat(all_p_fine, dim=0).numpy()
+
+    # Concatenar locales en dispositivo actual
+    local_y = torch.cat(all_y_fine, dim=0)
+    local_p = torch.cat(all_p_fine, dim=0)
+
+    # Si estamos en entorno distribuido (NCCL), hacer all_gather en CUDA
+    if dist.is_available() and dist.is_initialized():
+        world_size = dist.get_world_size()
+
+        # Recolectar longitudes para manejar tamaños variables
+        local_n = torch.tensor([local_y.size(0)], device=device, dtype=torch.int64)
+        gathered_n = [torch.zeros(1, device=device, dtype=torch.int64) for _ in range(world_size)]
+        dist.all_gather(gathered_n, local_n)
+        max_n = int(torch.stack([g[0] for g in gathered_n]).max().item())
+
+        if local_y.size(0) < max_n:
+            pad_rows = max_n - local_y.size(0)
+            local_y = nn.functional.pad(local_y, (0, 0, 0, pad_rows))
+            local_p = nn.functional.pad(local_p, (0, 0, 0, pad_rows))
+
+        gathered_y = [torch.empty_like(local_y, device=device) for _ in range(world_size)]
+        gathered_p = [torch.empty_like(local_p, device=device) for _ in range(world_size)]
+        dist.all_gather(gathered_y, local_y)
+        dist.all_gather(gathered_p, local_p)
+
+        parts_y = []
+        parts_p = []
+        for r in range(world_size):
+            n_r = int(gathered_n[r][0].item())
+            if n_r > 0:
+                parts_y.append(gathered_y[r][:n_r])
+                parts_p.append(gathered_p[r][:n_r])
+        global_y = torch.cat(parts_y, dim=0) if len(parts_y) > 0 else local_y[:0]
+        global_p = torch.cat(parts_p, dim=0) if len(parts_p) > 0 else local_p[:0]
+    else:
+        global_y = local_y
+        global_p = local_p
+
+    # Mover a CPU para métricas con sklearn
+    y_true = global_y.cpu().numpy()
+    y_prob = global_p.cpu().numpy()
     from sklearn.metrics import roc_auc_score, average_precision_score, f1_score
     c = y_true.shape[1]
     aurocs = []
