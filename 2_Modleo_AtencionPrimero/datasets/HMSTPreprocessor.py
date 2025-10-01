@@ -28,54 +28,66 @@ class HMSTPreprocessor(ECG12Large):  # Extiende
         if self.balance_rare:
             self._balance_labels()  # SMOTE en init
 
-    def _load_snomed_hierarchy(self):
-        hier = {}  # Ejemplo: {'AFIB': {'coarse': 'Rhythm', 'snomed_coarse': '426783006', 'is_a': True}}
-        # Query BioPortal (simplificado; full con API key)
-        url = "https://data.bioontology.org/ontologies/SNOMEDCT/classes"
-        params = {'q': 'atrial fibrillation', 'apikey': self.snomed_api_key or 'free'}
-        try:
-            resp = requests.get(url, params=params)
-            data = resp.json()
-            for item in data.get('collection', []):
-                code = item['@id'].split('/')[-1]
-                hier[code] = {'coarse': '426783006', 'is_a': True}  # Hardcode para demo; expandir
-        except:
-            hier = {'AFIB': {'coarse': 'Rhythm', 'snomed_coarse': '426783006', 'is_a': True}}  # Fallback
-        # Merge con self.hierarchy
-        for fine, coarse in self.hierarchy.get('fine_to_coarse', {}).items():
-            if fine not in hier:
-                hier[fine] = {'coarse': coarse, 'snomed_coarse': 'default', 'is_a': True}
-        return hier
-
     def _load_snomed_hierarchy_from_csv(self, csv_path='datos/12Large/ConditionNames_SNOMED-CT.csv'):
         # Verificar que el archivo CSV existe
         if not os.path.exists(csv_path):
             print(f"Warning: CSV file {csv_path} not found, using hierarchy-based fallback")
             return self._create_hierarchy_based_fallback()
             
-        # Lee CSV local (ajusta columnas si diferente, e.g., 'code', 'parent', 'name')
+        # Lee CSV local con las columnas correctas
         try:
             df = pd.read_csv(csv_path)
-            hier = {}  # {fine_code: {'coarse_code': str, 'snomed_coarse': int, 'is_a': bool}}
+            print(f"CSV cargado: {len(df)} filas, columnas: {list(df.columns)}")
+            
+            hier = {}  # {fine_code: {'coarse_code': str, 'snomed_coarse': str, 'is_a': bool}}
+            
+            # Mapear códigos SNOMED del CSV a la jerarquía existente
             for _, row in df.iterrows():
-                fine = row.get('fine_code', row.get('code', 'UNKNOWN'))  # Ajusta columna
-                coarse = row.get('coarse_code', row.get('parent', 'UNKNOWN'))
-                snomed_coarse = row.get('snomed_coarse', row.get('snomed_parent', 0))
-                is_a = row.get('is_a', True)  # Default True si implica
-                hier[fine] = {'coarse': coarse, 'snomed_coarse': snomed_coarse, 'is_a': bool(is_a)}
+                snomed_code = str(row['Snomed_CT']).strip()
+                acronym = str(row['Acronym Name']).strip()
+                full_name = str(row['Full Name']).strip()
+                
+                # Buscar este código SNOMED en los fine_codes de la jerarquía
+                if snomed_code in self.fine_codes:
+                    # Encontrar el coarse correspondiente en la jerarquía
+                    coarse_name = None
+                    for coarse, fine_list in self.hierarchy.get('fine_to_coarse', {}).items():
+                        if snomed_code in fine_list:
+                            coarse_name = coarse
+                            break
+                    
+                    if coarse_name:
+                        hier[snomed_code] = {
+                            'coarse': coarse_name,
+                            'snomed_coarse': snomed_code,  # Usar el mismo código
+                            'is_a': True,
+                            'acronym': acronym,
+                            'full_name': full_name
+                        }
+                        print(f"Mapeado: {acronym} ({snomed_code}) -> {coarse_name}")
+                    else:
+                        print(f"Warning: No se encontró coarse para {acronym} ({snomed_code})")
+                else:
+                    print(f"Warning: Código {snomed_code} no está en fine_codes")
+                    
         except Exception as e:
             print(f"Error reading CSV: {e}, using hierarchy-based fallback")
             return self._create_hierarchy_based_fallback()
             
-        # Merge con self.hierarchy si existe
+        # Merge con self.hierarchy para asegurar que tenemos todos los códigos
         for fine, coarse in self.hierarchy.get('fine_to_coarse', {}).items():
             if fine not in hier:
-                hier[fine] = {'coarse': coarse, 'snomed_coarse': 0, 'is_a': True}
+                hier[fine] = {
+                    'coarse': coarse, 
+                    'snomed_coarse': fine,  # Usar el mismo código
+                    'is_a': True
+                }
         
         # Construye matriz learnable [num_fine, num_coarse] para loss (1 si is_a)
         num_fine = len(self.fine_codes) if self.fine_codes else 71
         num_coarse = len(self.coarse_names) if self.coarse_names else 10
         hier_matrix = torch.zeros(num_fine, num_coarse)
+        
         for i, fine in enumerate(self.fine_codes):
             if fine in hier and hier[fine]['is_a']:
                 coarse_idx = self.coarse_name_to_idx.get(hier[fine]['coarse'], 0)
@@ -83,10 +95,11 @@ class HMSTPreprocessor(ECG12Large):  # Extiende
         
         self.hier_matrix = nn.Parameter(hier_matrix)  # Learnable en model
         print(f"SNOMED cargado de CSV: {len(hier)} mappings, matriz {hier_matrix.shape}")
+        print(f"Códigos mapeados desde CSV: {len([k for k in hier.keys() if 'acronym' in hier[k]])}")
         return hier
 
     def _create_hierarchy_based_fallback(self):
-        """Crear jerarquía basada en self.hierarchy existente"""
+        """Crear jerarquía basada en self.hierarchy existente (datos reales)"""
         hier = {}
         
         # Usar self.hierarchy como base (datos reales)
@@ -94,7 +107,7 @@ class HMSTPreprocessor(ECG12Large):  # Extiende
             for fine, coarse in self.hierarchy.get('fine_to_coarse', {}).items():
                 hier[fine] = {
                     'coarse': coarse, 
-                    'snomed_coarse': 0,  # Default SNOMED code
+                    'snomed_coarse': fine,  # Usar el mismo código
                     'is_a': True
                 }
         
@@ -114,16 +127,66 @@ class HMSTPreprocessor(ECG12Large):  # Extiende
         return hier
 
     def _balance_labels(self):
-        # SMOTE multi-label approx: Trata coarse como cat, fine como num
+        """Balancear labels usando SMOTE - solo si hay suficientes datos"""
         if not self.multilabel:
+            print("No es multilabel, saltando balanceo")
             return
-        # Stack y_fine + y_coarse para SMOTE
-        stacked = np.hstack([self._get_all_y_fine(), self._get_all_y_coarse()[:, :10]])  # Top 10 coarse cat
-        smote = SMOTENC(categorical_features=range(71, 81), random_state=42)  # Fine num, coarse cat
-        balanced = smote.fit_resample(stacked)[0]
-        self.balanced_samples = balanced[:71]  # Solo fine; reasigna a samples
-        # Rebalance self.samples indices (simplificado; full: reordena)
-        print(f"Balanceado: {len(self.samples)} → {len(balanced)}")
+            
+        try:
+            # Obtener datos de labels
+            y_fine = self._get_all_y_fine()
+            y_coarse = self._get_all_y_coarse()
+            
+            if len(y_fine) == 0 or len(y_coarse) == 0:
+                print("No hay datos de labels para balancear")
+                return
+                
+            print(f"Datos para balancear: {len(y_fine)} muestras, {y_fine.shape[1]} fine labels, {y_coarse.shape[1]} coarse labels")
+            
+            # Verificar que hay suficientes muestras para SMOTE
+            if len(y_fine) < 10:
+                print("Muy pocas muestras para SMOTE, saltando balanceo")
+                return
+                
+            # Combinar fine y coarse para SMOTE
+            stacked = np.hstack([y_fine, y_coarse[:, :10]])  # Top 10 coarse categories
+            
+            # SMOTENC necesita X e y por separado
+            X = stacked  # Usar los labels como "features" para SMOTE
+            y = np.ones(len(X))  # Dummy target para SMOTE
+            
+            # Aplicar SMOTE
+            smote = SMOTENC(categorical_features=range(y_fine.shape[1], y_fine.shape[1] + 10), random_state=42)
+            X_balanced, y_balanced = smote.fit_resample(X, y)
+            
+            # Extraer los labels balanceados
+            balanced_fine = X_balanced[:, :y_fine.shape[1]]
+            balanced_coarse = X_balanced[:, y_fine.shape[1]:y_fine.shape[1] + 10]
+            
+            # Actualizar samples con datos balanceados
+            self._update_samples_with_balanced_labels(balanced_fine, balanced_coarse)
+            
+            print(f"Balanceado exitoso: {len(y_fine)} → {len(balanced_fine)} muestras")
+            
+        except Exception as e:
+            print(f"Error en SMOTE: {e}, continuando sin balanceo")
+
+    def _update_samples_with_balanced_labels(self, balanced_fine, balanced_coarse):
+        """Actualizar samples con labels balanceados"""
+        # Crear nuevos samples con labels balanceados
+        new_samples = []
+        for i, sample in enumerate(self.samples):
+            if i < len(balanced_fine):
+                # Mantener la estructura original pero con labels balanceados
+                if len(sample) >= 4:
+                    hea, mat, _, _ = sample
+                    new_samples.append((hea, mat, balanced_fine[i], balanced_coarse[i]))
+                else:
+                    new_samples.append(sample)
+            else:
+                new_samples.append(sample)
+        
+        self.samples = new_samples
 
     def _get_all_y_fine(self):
         return np.array([rec[2] for rec in self.samples if len(rec)>2])
