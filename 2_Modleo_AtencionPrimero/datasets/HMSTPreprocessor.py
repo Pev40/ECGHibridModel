@@ -10,6 +10,7 @@ import torch.nn.functional as F
 import wandb
 import pandas as pd
 import torch.nn as nn
+import os
 
 class HMSTPreprocessor(ECG12Large):  # Extiende
     def __init__(self, *args, wide_feats=True, balance_rare=True, **kwargs):
@@ -17,6 +18,12 @@ class HMSTPreprocessor(ECG12Large):  # Extiende
         self.wide_feats = wide_feats
         self.balance_rare = balance_rare
         self.snomed_api_key = "80697352-209b-4287-802b-c6a6f73fe545"  # Opcional para queries
+        
+        # Verificar que self.hierarchy esté disponible
+        if not hasattr(self, 'hierarchy') or self.hierarchy is None:
+            raise ValueError("Hierarchy not loaded. Make sure hierarchy_path is valid and file exists.")
+        
+        # Ahora sí cargar SNOMED después de que self.hierarchy esté disponible
         self.snomed_hier = self._load_snomed_hierarchy_from_csv()  
         if self.balance_rare:
             self._balance_labels()  # SMOTE en init
@@ -41,7 +48,13 @@ class HMSTPreprocessor(ECG12Large):  # Extiende
         return hier
 
     def _load_snomed_hierarchy_from_csv(self, csv_path='datos/12Large/ConditionNames_SNOMED-CT.csv'):
-            # Lee CSV local (ajusta columnas si diferente, e.g., 'code', 'parent', 'name')
+        # Verificar que el archivo CSV existe
+        if not os.path.exists(csv_path):
+            print(f"Warning: CSV file {csv_path} not found, using hierarchy-based fallback")
+            return self._create_hierarchy_based_fallback()
+            
+        # Lee CSV local (ajusta columnas si diferente, e.g., 'code', 'parent', 'name')
+        try:
             df = pd.read_csv(csv_path)
             hier = {}  # {fine_code: {'coarse_code': str, 'snomed_coarse': int, 'is_a': bool}}
             for _, row in df.iterrows():
@@ -50,23 +63,55 @@ class HMSTPreprocessor(ECG12Large):  # Extiende
                 snomed_coarse = row.get('snomed_coarse', row.get('snomed_parent', 0))
                 is_a = row.get('is_a', True)  # Default True si implica
                 hier[fine] = {'coarse': coarse, 'snomed_coarse': snomed_coarse, 'is_a': bool(is_a)}
-            # Merge con self.hierarchy si existe
+        except Exception as e:
+            print(f"Error reading CSV: {e}, using hierarchy-based fallback")
+            return self._create_hierarchy_based_fallback()
+            
+        # Merge con self.hierarchy si existe
+        for fine, coarse in self.hierarchy.get('fine_to_coarse', {}).items():
+            if fine not in hier:
+                hier[fine] = {'coarse': coarse, 'snomed_coarse': 0, 'is_a': True}
+        
+        # Construye matriz learnable [num_fine, num_coarse] para loss (1 si is_a)
+        num_fine = len(self.fine_codes) if self.fine_codes else 71
+        num_coarse = len(self.coarse_names) if self.coarse_names else 10
+        hier_matrix = torch.zeros(num_fine, num_coarse)
+        for i, fine in enumerate(self.fine_codes):
+            if fine in hier and hier[fine]['is_a']:
+                coarse_idx = self.coarse_name_to_idx.get(hier[fine]['coarse'], 0)
+                hier_matrix[i, coarse_idx] = 1.0
+        
+        self.hier_matrix = nn.Parameter(hier_matrix)  # Learnable en model
+        print(f"SNOMED cargado de CSV: {len(hier)} mappings, matriz {hier_matrix.shape}")
+        return hier
+
+    def _create_hierarchy_based_fallback(self):
+        """Crear jerarquía basada en self.hierarchy existente"""
+        hier = {}
+        
+        # Usar self.hierarchy como base (datos reales)
+        if hasattr(self, 'hierarchy') and self.hierarchy is not None:
             for fine, coarse in self.hierarchy.get('fine_to_coarse', {}).items():
-                if fine not in hier:
-                    hier[fine] = {'coarse': coarse, 'snomed_coarse': 0, 'is_a': True}
-            self.snomed_hier = hier
-            # Construye matriz learnable [num_fine, num_coarse] para loss (1 si is_a)
-            num_fine = len(self.fine_codes) if self.fine_codes else 71
-            num_coarse = len(self.coarse_names) if self.coarse_names else 10
-            hier_matrix = torch.zeros(num_fine, num_coarse)
+                hier[fine] = {
+                    'coarse': coarse, 
+                    'snomed_coarse': 0,  # Default SNOMED code
+                    'is_a': True
+                }
+        
+        # Construye matriz learnable [num_fine, num_coarse] para loss (1 si is_a)
+        num_fine = len(self.fine_codes) if self.fine_codes else 71
+        num_coarse = len(self.coarse_names) if self.coarse_names else 10
+        hier_matrix = torch.zeros(num_fine, num_coarse)
+        
+        if hasattr(self, 'fine_codes') and hasattr(self, 'coarse_name_to_idx'):
             for i, fine in enumerate(self.fine_codes):
                 if fine in hier and hier[fine]['is_a']:
                     coarse_idx = self.coarse_name_to_idx.get(hier[fine]['coarse'], 0)
                     hier_matrix[i, coarse_idx] = 1.0
-            self.hier_matrix = nn.Parameter(hier_matrix)  # Learnable en model
-            print(f"SNOMED cargado de CSV: {len(hier)} mappings, matriz {hier_matrix.shape}")
-            return hier
-
+        
+        self.hier_matrix = nn.Parameter(hier_matrix)  # Learnable en model
+        print(f"SNOMED fallback basado en hierarchy: {len(hier)} mappings, matriz {hier_matrix.shape}")
+        return hier
 
     def _balance_labels(self):
         # SMOTE multi-label approx: Trata coarse como cat, fine como num
@@ -91,7 +136,7 @@ class HMSTPreprocessor(ECG12Large):  # Extiende
             return np.zeros(3)
         # HR, RMSSD, entropy en lead II (x[1])
         lead_ii = x[1].numpy() if torch.is_tensor(x) else x[1]
-        peaks, _ = find_peaks(lead_ii, distance=FS_TARGET//2, height=np.mean(lead_ii)*0.5)
+        peaks, _ = find_peaks(lead_ii, distance=self.target_fs//2, height=np.mean(lead_ii)*0.5)
         if len(peaks) < 2:
             return np.array([60.0, 0.0, 0.0])  # Default
         rr = np.diff(peaks) / self.target_fs * 60  # ms to BPM
@@ -124,9 +169,3 @@ class HMSTPreprocessor(ECG12Large):  # Extiende
         return item
 
 # Uso extendido para PhysioNet/KCL (adaptar glob para /physionet/challenge-2020)
-ds = HMSTPreprocessor(root_dir='datos/12Large', sequence_len=7500, multilabel=True, hierarchy_path='hierarchy.json', target_fs=500.0)
-dl = DataLoader(ds, batch_size=128, shuffle=True, num_workers=16)  # RTX maneja fácil
-for batch in dl:
-    print(batch['samples'].shape)  # [128,12,7500]
-    break
-wandb.log({"dataset_size": len(ds), "wide_feats_mean_hr": batch['wide_feats'][:,0].mean()})
