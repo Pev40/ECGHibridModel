@@ -151,16 +151,21 @@ class HMSTPreprocessor(ECG12Large):  # Extiende
         item['wide_feats'] = wide
         # SNOMED embed (one-hot coarse para CLS)
         if self.snomed_hier:
-            fine_labels = item.get('labels_fine', torch.zeros(71))
+            fine_labels = item.get('labels_fine', torch.zeros(len(self.fine_codes)))
             active_snomed = []
             for i, fine in enumerate(self.fine_codes):
                 if fine_labels[i] > 0 and fine in self.snomed_hier:
                     snomed_c = self.snomed_hier[fine]['snomed_coarse']
-                    active_snomed.append(snomed_c % 10)  # Mod 10 para dim=10; ajusta si full codes
+                    # Convertir a int y aplicar mod, o usar hash si es string
+                    try:
+                        snomed_int = int(snomed_c) % len(self.coarse_names)
+                    except (ValueError, TypeError):
+                        snomed_int = hash(snomed_c) % len(self.coarse_names)
+                    active_snomed.append(snomed_int)
             if active_snomed:
-                snomed_embed = F.one_hot(torch.tensor(active_snomed), 10).float().mean(0)  # Avg one-hot
+                snomed_embed = F.one_hot(torch.tensor(active_snomed), len(self.coarse_names)).float().mean(0)  # Avg one-hot
             else:
-                snomed_embed = torch.zeros(10)
+                snomed_embed = torch.zeros(len(self.coarse_names))
             item['snomed_embed'] = snomed_embed
         return item
 
