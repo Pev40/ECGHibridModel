@@ -118,7 +118,12 @@ class HMST(nn.Module):
         # Logits
         coarse_logits = self.head_coarse(cls_out)
         fine_logits = self.head_fine(cls_out)
-        return coarse_logits, fine_logits, (attn_weights if use_attn else None)
+        
+        # Solo retornar attn_weights si se solicitan, para evitar parámetros no utilizados
+        if use_attn:
+            return coarse_logits, fine_logits, attn_weights
+        else:
+            return coarse_logits, fine_logits
 
     def consistency_loss(self, coarse_pred_probs, fine_pred_probs):
         hier_pos = F.softplus(self.hier_matrix)

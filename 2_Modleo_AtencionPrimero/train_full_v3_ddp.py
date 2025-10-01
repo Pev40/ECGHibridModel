@@ -6,6 +6,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from torch import nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
@@ -129,6 +130,17 @@ def dice_loss_multilabel(logits, targets, smooth=1e-6):
     return 1.0 - dice.mean()
 
 
+def focal_loss_multi_label(logits, targets, alpha=0.25, gamma=2.0):
+    """Focal loss for multi-label classification"""
+    probs = torch.sigmoid(logits)
+    ce_loss = F.binary_cross_entropy_with_logits(logits, targets, reduction='none')
+    p_t = probs * targets + (1 - probs) * (1 - targets)
+    alpha_t = alpha * targets + (1 - alpha) * (1 - targets)
+    focal_weight = alpha_t * (1 - p_t) ** gamma
+    focal_loss = focal_weight * ce_loss
+    return focal_loss.mean()
+
+
 def evaluate_v3(model, dl, fine_code_to_idx, coarse_groups, base_loss_fn, compute_stats=True,
                 use_dice_on_fine=False, dice_weight=0.5, device=None, is_distributed=False):
     """Evaluate model with distributed support"""
@@ -152,7 +164,11 @@ def evaluate_v3(model, dl, fine_code_to_idx, coarse_groups, base_loss_fn, comput
             snomed_embed = y_coarse
             
             with autocast_cuda(device.type=='cuda'):
-                logits_coarse, logits_fine, _ = model(x, wide_feats, snomed_embed)
+                model_output = model(x, wide_feats, snomed_embed)
+                if len(model_output) == 3:
+                    logits_coarse, logits_fine, _ = model_output
+                else:
+                    logits_coarse, logits_fine = model_output
                 
                 loss_coarse = base_loss_fn(logits_coarse, y_coarse)
                 if use_dice_on_fine:
@@ -362,7 +378,7 @@ def main():
     
     # Wrap with DDP
     if is_distributed:
-        model = DDP(model, device_ids=[local_rank], output_device=local_rank)
+        model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
 
     # Optimizador y pérdidas
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -406,7 +422,11 @@ def main():
             snomed_embed = y_coarse
 
             with autocast_cuda(args.mixed_precision and device.type=='cuda'):
-                logits_coarse, logits_fine, _ = model(x, wide_feats, snomed_embed)
+                model_output = model(x, wide_feats, snomed_embed)
+                if len(model_output) == 3:
+                    logits_coarse, logits_fine, _ = model_output
+                else:
+                    logits_coarse, logits_fine = model_output
                 loss_coarse = base_loss_fn(logits_coarse, y_coarse)
                 if getattr(args, 'use_dice_on_fine', False):
                     base_l = base_loss_fn(logits_fine, y_fine)
