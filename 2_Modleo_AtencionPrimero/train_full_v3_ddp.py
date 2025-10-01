@@ -596,8 +596,14 @@ def main():
         if not is_distributed or rank == 0:
             print(f'Test results: {test_metrics}')
             os.makedirs(args.exp_dir, exist_ok=True)
+            # Guardar JSON sin arrays y NPZ con arrays
+            tm = dict(test_metrics)
+            y_true_np = tm.pop('y_true', None)
+            y_prob_np = tm.pop('y_prob', None)
             with open(os.path.join(args.exp_dir, 'test_metrics.json'), 'w') as f:
-                json.dump(test_metrics, f, indent=2)
+                json.dump(tm, f, indent=2)
+            if y_true_np is not None and y_prob_np is not None:
+                np.savez(os.path.join(args.exp_dir, 'test_predictions.npz'), y_true=y_true_np, y_prob=y_prob_np)
         cleanup_ddp()
         return
     
@@ -736,9 +742,14 @@ def main():
         dist.barrier()
     if print_prefix:
         print(f'Test results: {test_metrics}')
-        # Save final results
+        # Guardar JSON sin arrays y NPZ con arrays
+        tm = dict(test_metrics)
+        y_true_np = tm.pop('y_true', None)
+        y_prob_np = tm.pop('y_prob', None)
         with open(os.path.join(args.exp_dir, 'test_metrics.json'), 'w') as f:
-            json.dump(test_metrics, f, indent=2)
+            json.dump(tm, f, indent=2)
+        if y_true_np is not None and y_prob_np is not None:
+            np.savez(os.path.join(args.exp_dir, 'test_predictions.npz'), y_true=y_true_np, y_prob=y_prob_np)
 
     cleanup_ddp()
 
