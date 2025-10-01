@@ -12,6 +12,7 @@ class HMST(nn.Module):
         super().__init__()
         self.d_model = d_model
         self.num_stages = num_stages
+        self.num_coarse = num_coarse
         self.input_proj = nn.Linear(input_channels, d_model)  # Proyección de (leads + wide_feats) a d_model
 
         # Etapas convolucionales multi-escala que preservan T y canales (=d_model)
@@ -48,6 +49,9 @@ class HMST(nn.Module):
         # Matriz jerarquía learnable [fine, coarse] para consistency
         self.hier_matrix = nn.Parameter(torch.randn(num_fine, num_coarse))
 
+        # Learnable lambda para multi-scale diff
+        self.lambda_diff = nn.Parameter(torch.tensor(0.5))
+
     def forward(self, x, wide_feats=None, snomed_embed=None, use_attn=False):
         # x: [B, 12, T]; wide_feats: [B, 3]; snomed_embed: [B, snomed_dim]
         b, _, t = x.shape
@@ -64,25 +68,36 @@ class HMST(nn.Module):
         inp = inp.permute(0, 2, 1)  # [B, T, C]
         inp = self.input_proj(inp)  # [B, T, d_model]
 
-        # Conv1d depthwise + pointwise por etapa (preserva T y d)
         stages_out = []
         attn_weights = []
-        x_feat = inp.permute(0, 2, 1)  # [B, d_model, T] para Conv1d
+        prev_stage = None  # Para multi-scale diff
+        x_feat = inp.permute(0, 2, 1)  # [B, d_model, T]
         for i in range(self.num_stages):
-            stage = self.conv_stages[i](x_feat)            # [B, d_model, T]
-            stage = self.conv_pw[i](stage)                 # [B, d_model, T]
-            stage = stage.permute(0, 2, 1)                 # [B, T, d_model]
+            stage = self.conv_stages[i](x_feat)
+            stage = self.conv_pw[i](stage)
+            stage = stage.permute(0, 2, 1)  # [B, T, d_model]
             stage_resh = rearrange(stage, 'b t d -> b t 1 d')
+            
+            # Atención diferencial (nueva versión)
             attn_stage, w = self.attn_stages[i](stage_resh, use_attn=use_attn)
             if use_attn:
                 attn_weights.append(w)
-            stage_out = attn_stage.mean(dim=2)             # [B, T, d_model]
+            stage_out = attn_stage.mean(dim=2)  # [B, T, d_model]
+            
+            # Multi-scale differential: Subtract prev stage (if exists) para hierarchical diff
+            if prev_stage is not None:
+                scale_diff = stage_out - prev_stage  # Diff entre scales
+                stage_out = stage_out + self.lambda_diff * scale_diff  # Learnable blend
+            prev_stage = stage_out
+            
             stages_out.append(stage_out)
-
-        # Fusión y proyección a d_model
-        x_fused = torch.cat(stages_out, dim=-1)            # [B, T, num_stages*d_model]
-        x_fused = self.fuse_linear(x_fused)                # [B, T, d_model]
-
+        
+        # Fuse con jerarquía: Modula fuse con hier_matrix (para label-aware)
+        x_fused = torch.cat(stages_out, dim=-1)  # [B, T, num_stages*d_model]
+        hier_mod = self.hier_matrix.mean(dim=0).unsqueeze(0).unsqueeze(0).expand(b, t, -1)  # [B, T, num_coarse]
+        x_fused = x_fused * hier_mod.unsqueeze(1).expand(-1, -1, self.num_stages * self.d_model // self.num_coarse)  # Modulate
+        x_fused = self.fuse_linear(x_fused)
+        
         # Transformer con token CLS modulado por SNOMED
         cls = self.cls_token.expand(b, -1, -1) + self.snomed_proj(snomed_embed).unsqueeze(1)
         x_seq = torch.cat([cls, x_fused], dim=1)           # [B, 1+T, d_model]
@@ -93,10 +108,14 @@ class HMST(nn.Module):
         coarse_logits = self.head_coarse(cls_out)
         fine_logits = self.head_fine(cls_out)
         return coarse_logits, fine_logits, (attn_weights if use_attn else None)
-       # pred_coarse_from_fine = torch.matmul(fine_pred_probs, self.hier_matrix)
+
     def consistency_loss(self, coarse_pred_probs, fine_pred_probs):
-        # Penaliza: fine @ hier_matrix ≈ coarse (en espacio de probabilidades)
-        # Regularización: restringir hier_matrix a valores positivos mediante softplus
-        hier_pos = torch.nn.functional.softplus(self.hier_matrix)
+        hier_pos = F.softplus(self.hier_matrix)
         pred_coarse_from_fine = torch.matmul(fine_pred_probs, hier_pos)
-        return F.mse_loss(pred_coarse_from_fine, coarse_pred_probs)
+        mse = F.mse_loss(pred_coarse_from_fine, coarse_pred_probs)
+        
+        # Nuevo: Diferencial consistency (diff entre preds)
+        diff_fine = fine_pred_probs - fine_pred_probs.mean(dim=1, keepdim=True)
+        diff_coarse = coarse_pred_probs - coarse_pred_probs.mean(dim=1, keepdim=True)
+        diff_loss = F.mse_loss(torch.matmul(diff_fine, hier_pos), diff_coarse)  # Consistency en diffs
+        return mse + 0.5 * diff_loss  # Balance
